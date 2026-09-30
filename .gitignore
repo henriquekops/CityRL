@@ -10,5 +10,8 @@ wheels/
 .venv
 .claude
 
+#MacOS
+.DS_Store
+
 # results
 results
