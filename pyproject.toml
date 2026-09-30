@@ -1,0 +1,9 @@
+[project]
+name = "CityRL"
+version = "0.1.0"
+description = "CityRL"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.5.3",
+]
