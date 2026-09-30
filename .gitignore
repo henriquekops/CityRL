@@ -10,8 +10,11 @@ wheels/
 .venv
 .claude
 
-#MacOS
+# MacOS
 .DS_Store
+
+# Jetbrains
+.idea
 
 # results
 results
