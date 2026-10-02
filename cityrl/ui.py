@@ -12,7 +12,7 @@ from .trainer import Hyperparameters, Trainer
 
 CELL_PIXELS = 60
 DEFAULT_EPOCHS = 100
-DEFAULT_AGENTS_PER_EPOCH = 20
+DEFAULT_AGENTS_PER_EPOCH = 300
 MAX_VISUALIZED_AGENTS = 10
 VISUALIZATION_TICK_MS = 300         # slow motion when following the chosen agents
 WATCH_EVERY_N_EPOCHS = 10           # when watching the training, show one epoch out of this many
