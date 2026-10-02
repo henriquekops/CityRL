@@ -1,21 +1,16 @@
-"""Fixed city map: a gridworld with 3 horizontal and 3 vertical streets (4 blocks), a traffic light at each
-crossing, houses (the destinations) and one hole drawn at random each time the program starts.
-
-The map is a grid of cells and every cell is identified by one number: cell = row * GRID_SIZE + col.
-A street cell is where an agent can stand; a cell holds at most one agent."""
 import random
 
 NORTH, EAST, SOUTH, WEST = range(4)
-DIRECTION_DELTAS = [(-1, 0), (0, 1), (1, 0), (0, -1)]       # (row, col) step of each direction
+DIRECTION_DELTAS = [(-1, 0), (0, 1), (1, 0), (0, -1)]
 
 STREETS_PER_SIDE = 3
-BLOCK_SIZE = 4                                               # house cells between two parallel streets
-ROAD_SPACING = BLOCK_SIZE + 1                                # cells between two parallel streets
+BLOCK_SIZE = 4
+ROAD_SPACING = BLOCK_SIZE + 1
 GRID_SIZE = (STREETS_PER_SIDE - 1) * ROAD_SPACING + 1
 
 DESTINATION_NAMES = "ABCD"
-DESTINATION_HOUSES = [(1, 2), (2, 9), (9, 7), (7, 1)]        # (row, col) of A, B, C, D: one house per block
-HOLE_SEED = None                                             # None: a new random hole at every start; an int fixes it
+DESTINATION_HOUSES = [(1, 2), (2, 9), (9, 7), (7, 1)]
+HOLE_SEED = None
 
 
 def cell_of(row, col):
@@ -35,7 +30,6 @@ def is_intersection(row, col):
 
 
 def street_neighbor(row, col, direction):
-    """Cell next to (row, col) in a direction if it is a street cell, else -1."""
     d_row, d_col = DIRECTION_DELTAS[direction]
     row, col = row + d_row, col + d_col
     inside = 0 <= row < GRID_SIZE and 0 <= col < GRID_SIZE
@@ -59,14 +53,11 @@ class City:
         self.hole = position_of(self.hole_cell)
 
     def _random_hole_cell(self):
-        """Any street cell except intersections (traffic lights) and destination doors. A single hole never
-        disconnects the map: every street cell that remains still reaches an intersection."""
         candidates = [cell for cell in self.street_cells
                       if cell not in self.intersection_index and cell not in self.door_cell]
         return random.Random(HOLE_SEED).choice(candidates)
 
     def _arm(self, intersection_cell, direction):
-        """The street cells leaving an intersection in one direction, up to the next intersection."""
         arm, cell = [], intersection_cell
         while len(arm) < BLOCK_SIZE and self.neighbor[cell][direction] >= 0:
             cell = self.neighbor[cell][direction]
@@ -75,7 +66,6 @@ class City:
 
     @staticmethod
     def _door_of(house):
-        """A house's door is the street cell next to it; reaching it means arriving."""
         for direction in range(4):
             door = street_neighbor(*house, direction)
             if door >= 0:
@@ -88,13 +78,10 @@ class City:
         return row in (0, GRID_SIZE - 1) or col in (0, GRID_SIZE - 1)
 
     def distance_to_door(self, cell, destination):
-        """Straight-line distance over the grid (|rows| + |cols|) from a cell to a destination's door. It ignores
-        blocks and the hole, so it points the way without giving the route away."""
         (row, col), (door_row, door_col) = position_of(cell), position_of(self.door_cell[destination])
         return abs(row - door_row) + abs(col - door_col)
 
     def can_place_agent(self, cell):
-        """Agents may start on any street cell except intersections (traffic lights) and the hole."""
         return cell in self.neighbor and cell not in self.intersection_index and cell != self.hole_cell
 
 

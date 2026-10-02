@@ -1,4 +1,3 @@
-"""Tkinter interface: train the agents and visualize chosen agents running the learned policy."""
 import threading
 import time
 import tkinter as tk
@@ -14,9 +13,9 @@ CELL_PIXELS = 60
 DEFAULT_EPOCHS = 100
 DEFAULT_AGENTS_PER_EPOCH = 300
 MAX_VISUALIZED_AGENTS = 10
-VISUALIZATION_TICK_MS = 300         # slow motion when following the chosen agents
-WATCH_EVERY_N_EPOCHS = 10           # when watching the training, show one epoch out of this many
-WATCH_TICK_DELAY_S = 0.015          # pause per tick in the epochs that are shown
+VISUALIZATION_TICK_MS = 300
+WATCH_EVERY_N_EPOCHS = 10
+WATCH_TICK_DELAY_S = 0.015
 
 DESTINATION_COLORS = ["#e6194b", "#3cb44b", "#4363d8", "#f58231"]
 STREET_COLOR, BLOCK_COLOR, HOLE_COLOR = "#d9d9d9", "#f3e9d2", "black"
@@ -29,7 +28,6 @@ def cell_center_pixels(cell):
 
 
 def snapshot(simulation):
-    """What the map needs to draw one moment: signals and agents (x, y, destination, id)."""
     cars = [(*cell_center_pixels(agent.cell), agent.destination, agent.id) for agent in simulation.agents.values()]
     return dict(signal=list(simulation.signal), all_red=list(simulation.all_red_ticks), cars=cars)
 
@@ -40,18 +38,15 @@ class SelectedAgent(NamedTuple):
 
 
 class TrainingProgress:
-    """Written by the training thread, read by the interface."""
 
     def __init__(self, first_epoch):
-        self.first_epoch = first_epoch      # epochs trained before this run started
-        self.epochs_done = 0                # epochs finished in this run
+        self.first_epoch = first_epoch
+        self.epochs_done = 0
         self.last_record = None
-        self.snapshot = None                # moment of the epoch being watched, if any
+        self.snapshot = None
 
 
-# ---------- map drawing ----------
 class MapView(tk.Canvas):
-    """The city: static map (streets, hole, destinations, traffic lights) plus a layer redrawn on every frame."""
 
     def __init__(self, parent, on_click):
         size = GRID_SIZE * CELL_PIXELS
@@ -75,7 +70,6 @@ class MapView(tk.Canvas):
         self._draw_signals([CLOSED] * CITY.n_intersections, [0] * CITY.n_intersections, tag="signals")
 
     def _draw_signals(self, signal, all_red, tag):
-        """One bar per axis at every intersection: green where traffic flows, red otherwise."""
         half = CELL_PIXELS / 2
         for intersection, cell in enumerate(CITY.intersections):
             x, y = cell_center_pixels(cell)
@@ -90,7 +84,6 @@ class MapView(tk.Canvas):
         self.delete("frame")
 
     def show_frame(self, frame):
-        """Draw signals and agents of one moment (replaces the previous frame)."""
         self.clear_frame()
         self._draw_signals(frame["signal"], frame["all_red"], tag="frame")
         for x, y, destination, agent_id in frame["cars"]:
@@ -99,7 +92,6 @@ class MapView(tk.Canvas):
             self.create_text(x, y, text=str(agent_id + 1), fill="white", font=("Helvetica", 10, "bold"), tags="frame")
 
     def show_selection(self, agents):
-        """Mark the chosen starting cells with a numbered square in the color of the agent's destination."""
         self.delete("selection")
         for number, agent in enumerate(agents, start=1):
             row, col = position_of(agent.cell)
@@ -109,20 +101,19 @@ class MapView(tk.Canvas):
                              font=("Helvetica", 11, "bold"))
 
 
-# ---------- application ----------
 class App:
     def __init__(self, root):
         root.title("CityRL")
         self.root = root
-        self.trainer = None                     # created at the first training, with the hyperparameters on screen
+        self.trainer = None
         self.progress = TrainingProgress(first_epoch=0)
         self.total_epochs = DEFAULT_EPOCHS
         self.is_training = self.is_animating = False
-        self.stop_requested = False             # read by the training thread
-        self.watching_training = False          # read by the training thread
-        self.animation_job = None               # pending `after` call of the animation
-        self.selection = []                     # SelectedAgent list, one per cell
-        self.simulation = None                  # the simulation being visualized
+        self.stop_requested = False
+        self.watching_training = False
+        self.animation_job = None
+        self.selection = []
+        self.simulation = None
 
         self.map = MapView(root, on_click=self._on_map_click)
         self.map.grid(row=0, column=0, padx=8, pady=8)
@@ -133,9 +124,8 @@ class App:
         self._build_training_controls(side)
         self._build_visualization_controls(side)
         self.status_label.config(text="Train before visualizing.")
-        self._toggle_agent(0, 7)                # initial agent: top street, destination A
+        self._toggle_agent(0, 7)
 
-    # ---------- building the panel ----------
     def _build_run_settings(self, parent):
         row = ttk.Frame(parent)
         row.pack(anchor="w")
@@ -147,7 +137,6 @@ class App:
             row=1, column=1, padx=(12, 0))
 
     def _build_hyperparameter_panel(self, parent):
-        """One widget per field of `Hyperparameters`, grouped in columns by the group declared in the field."""
         self.hyperparameter_vars, self.hyperparameter_widgets = {}, []
         groups = {}
         for setting in fields(Hyperparameters):
@@ -212,7 +201,6 @@ class App:
         self.status_label = ttk.Label(parent, text="", foreground="#555", wraplength=200)
         self.status_label.pack(anchor="w")
 
-    # ---------- small helpers ----------
     def _set_buttons(self, train, new_run, visualize, stop=False):
         for button, enabled in ((self.train_button, train), (self.new_run_button, new_run),
                                 (self.visualize_button, visualize), (self.stop_button, stop)):
@@ -236,11 +224,10 @@ class App:
         self.map.clear_frame()
         self.simulation = None
 
-    # ---------- training ----------
     def _start_training(self):
         if self.is_training:
             return
-        if self.trainer is None:                # first training of a run: fix the hyperparameters
+        if self.trainer is None:
             hyperparameters = self._read_hyperparameters()
             if hyperparameters is None:
                 return
@@ -272,7 +259,6 @@ class App:
             self.is_training = False
 
     def _on_training_tick(self, simulation, epoch_number):
-        """Runs in the training thread after every tick: keep a snapshot of the epochs that are being watched."""
         epoch_in_run = epoch_number - self.progress.first_epoch
         if self.watching_training and (epoch_in_run - 1) % WATCH_EVERY_N_EPOCHS == 0:
             self.progress.snapshot = dict(snapshot(simulation), epoch=epoch_in_run)
@@ -291,7 +277,7 @@ class App:
             self.root.after(40, self._draw_watched_epoch)
 
     def _poll_training(self):
-        still_training = self.is_training       # read first: the last epoch is stored before the thread ends
+        still_training = self.is_training
         progress, record = self.progress, self.progress.last_record
         self.epoch_label.config(text=f"Epoch {progress.epochs_done} / {self.total_epochs}")
         self.progress_bar.config(value=progress.epochs_done)
@@ -315,7 +301,6 @@ class App:
             self.status_label.config(text=message)
 
     def _new_run(self):
-        """Discard the learned policy and unlock the hyperparameters: the next training is a new run."""
         if self.is_training or self.is_animating:
             return
         self.trainer = None
@@ -329,7 +314,6 @@ class App:
         self.status_label.config(text="New run: adjust the hyperparameters and train before visualizing.")
 
     def _stop(self):
-        """Stop whatever is running: the training (after discarding the unfinished epoch) or the animation."""
         if self.is_training:
             self.stop_requested = True
             self.status_label.config(text="Stopping...")
@@ -340,13 +324,11 @@ class App:
             self.status_label.config(text=f"Stopped at tick {self.simulation.time}.")
             self._set_buttons(train=True, new_run=True, visualize=True)
 
-    # ---------- choosing agents ----------
     def _on_map_click(self, row, col):
         if not self.is_animating:
             self._toggle_agent(row, col)
 
     def _toggle_agent(self, row, col):
-        """Click on a street cell: add an agent there (with the chosen destination) or remove the one already there."""
         cell = cell_of(row, col)
         if not CITY.can_place_agent(cell):
             return
@@ -367,7 +349,6 @@ class App:
             self._reset_visualization()
             self.map.show_selection(self.selection)
 
-    # ---------- visualization ----------
     def _start_visualization(self):
         if not self.selection or not self._is_trained():
             return

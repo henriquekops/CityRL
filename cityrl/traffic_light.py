@@ -1,31 +1,25 @@
-"""Traffic-light agent: tabular Q-learning on the number of waiting agents (the state used by Jin et al., 2011)."""
 from collections import defaultdict
 
 import numpy as np
 
 from .simulator import CLOSED
 
-MAX_COUNTED_AGENTS = 4        # counts above this are treated alike, which keeps the Q-table small
+MAX_COUNTED_AGENTS = 4
 
 
 class TrafficLightAgent:
-    """One agent per intersection, all sharing one Q-table. Action: 0 = east/west green, 1 = north/south green.
-
-    State: (agents on the north/south arms, agents on the east/west arms, current signal).
-    Rule (not learned): an intersection with no agents on its arms closes (all red)."""
 
     def __init__(self, learning_rate, discount, seed=0):
         self.learning_rate, self.discount = learning_rate, discount
-        self.q_table = defaultdict(lambda: np.zeros(2))                     # state -> value of each action
+        self.q_table = defaultdict(lambda: np.zeros(2))
         self.rng = np.random.default_rng(seed)
-        self.epsilon = 0.0                                                  # probability of a random action
-        self.previous = {}                                                  # intersection -> (state, action)
+        self.epsilon = 0.0
+        self.previous = {}
 
     def start_episode(self):
         self.previous = {}
 
     def decide(self, sim, learning):
-        """Set the signal of every intersection (called every `sim.decision_period` ticks)."""
         for intersection in range(sim.city.n_intersections):
             north_south, east_west = sim.waiting_by_axis(intersection)
             if north_south + east_west == 0:
@@ -46,14 +40,13 @@ class TrafficLightAgent:
         sim.set_signal(intersection, action)
 
     def _update_q(self, state, action, queue_cost, next_state):
-        """Temporal-difference update; the reward is minus the average number of agents held back by this light's red."""
         target = -queue_cost + self.discount * self.q_table[next_state].max()
         self.q_table[state][action] += self.learning_rate * (target - self.q_table[state][action])
 
     def _choose_action(self, state, learning, current_signal, north_south_busier):
         values = self.q_table[state]
-        if learning and self.rng.random() < self.epsilon:                   # explore
+        if learning and self.rng.random() < self.epsilon:
             return int(self.rng.integers(2))
-        if values[0] == values[1]:                                          # tie: keep the open axis, or open the busier one
+        if values[0] == values[1]:
             return current_signal if current_signal != CLOSED else int(north_south_busier)
         return int(np.argmax(values))
