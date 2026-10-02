@@ -21,7 +21,7 @@ avoid the hole faster.
   current signal; action = which axis gets green, decided every N ticks. An intersection with no agents on its arms
   closes (all red) by rule.
 - *Agents* (inspired by Hafez and Loo, 2015): state = cell, action = direction, one Q-table per destination shared by
-  all agents headed there. After each move the correction is also propagated backwards along the trip.
+  all agents headed there.
 
 ```bash
 uv run python main.py
@@ -46,6 +46,6 @@ measured in *ticks* (one tick = every agent tries to move one cell).
 | `city.py` | the map: street cells, intersections, hole, destination doors |
 | `simulator.py` | the rules, one `tick()` at a time (does not learn) |
 | `traffic_light.py` | `TrafficLightAgent` |
-| `agent_router.py` | `AgentRouter` (Q-learning + backward propagation) |
+| `agent_router.py` | `AgentRouter` (Q-learning) |
 | `trainer.py` | `Hyperparameters`, epoch loop, JSON results |
 | `ui.py` | tkinter interface (`MapView` draws, `App` controls) |

@@ -13,7 +13,7 @@ CELL_PIXELS = 60
 DEFAULT_EPOCHS = 100
 DEFAULT_AGENTS_PER_EPOCH = 20
 MAX_VISUALIZED_AGENTS = 10
-VISUALIZATION_TICK_MS = 250         # slow motion when following the chosen agents
+VISUALIZATION_TICK_MS = 300         # slow motion when following the chosen agents
 
 DESTINATION_COLORS = ["#e6194b", "#3cb44b", "#4363d8", "#f58231"]
 STREET_COLOR, BLOCK_COLOR, HOLE_COLOR = "#d9d9d9", "#f3e9d2", "black"

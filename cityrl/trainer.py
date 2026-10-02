@@ -31,16 +31,13 @@ class Hyperparameters:
     router_learning_rate: float = _setting(0.1, "Agent", "learning rate α", 0.01, 1, 0.05)
     router_discount: float = _setting(0.99, "Agent", "discount γ", 0.1, 0.999, 0.01)              # per tick
     router_epsilon: float = _setting(0.05, "Agent", "initial ε", 0.02, 1, 0.05)
-    backward_propagation: bool = _setting(True, "Agent", "backward propagation")                  # correct the whole trip
-    propagation_threshold: float = _setting(0.05, "Agent", "threshold ω", 0, 5, 0.05)             # stop below this size
 
 
 class Trainer:
     def __init__(self, hyperparameters=None):
         self.hyperparameters = hp = hyperparameters or Hyperparameters()
         self.light_agent = TrafficLightAgent(hp.light_learning_rate, hp.light_discount)
-        self.router = AgentRouter(hp.router_learning_rate, hp.router_discount,
-                                    hp.propagation_threshold if hp.backward_propagation else None)
+        self.router = AgentRouter(hp.router_learning_rate, hp.router_discount)
         self.history = []                                           # one record per trained epoch
         self.run_id = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 

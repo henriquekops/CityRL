@@ -56,7 +56,6 @@ class Agent:
         self.previous_cell = cell       # where the agent was at the start of the tick
         self.wait_ticks = 0             # ticks spent without moving
         self.last_decision = None       # (cell, direction), set and used by the router
-        self.transitions = []           # set and used by the router
 
 
 class Simulation:
