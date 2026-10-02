@@ -1,132 +1,101 @@
+"""Fixed city map: a gridworld with 3 horizontal and 3 vertical streets (4 blocks), a traffic light at each
+crossing, houses (the destinations) and one hole drawn at random each time the program starts.
+
+The map is a grid of cells and every cell is identified by one number: cell = row * GRID_SIZE + col.
+A street cell is where an agent can stand; a cell holds at most one agent."""
 import random
 
-N, E, S, W = range(4)
-DRC = [(-1, 0), (0, 1), (1, 0), (0, -1)]
-OPP = [2, 3, 0, 1]
+NORTH, EAST, SOUTH, WEST = range(4)
+DIRECTION_DELTAS = [(-1, 0), (0, 1), (1, 0), (0, -1)]       # (row, col) step of each direction
 
-M = 4             # ruas por direção = cruzamentos por lado
-L = 4             # células de cada trecho entre dois cruzamentos
-STEP = L + 1
-SIZE = (M - 1) * STEP + 1
-# casas de destino A, B, C, D (linha, coluna); cada uma tem uma porta numa rua vizinha
-DEST_HOUSES = [(1, 2), (4, 8), (11, 12), (14, 7)]
-HOLE_RATE = 0.04    # fração das células de rua com buraco (taxa baixa)
-HOLE_SEED = 7       # os buracos são sorteados uma vez com esta semente: o mapa é sempre o mesmo
+STREETS_PER_SIDE = 3
+BLOCK_SIZE = 4                                               # house cells between two parallel streets
+ROAD_SPACING = BLOCK_SIZE + 1                                # cells between two parallel streets
+GRID_SIZE = (STREETS_PER_SIDE - 1) * ROAD_SPACING + 1
+
+DESTINATION_NAMES = "ABCD"
+DESTINATION_HOUSES = [(1, 2), (2, 9), (9, 7), (7, 1)]        # (row, col) of A, B, C, D: one house per block
+HOLE_SEED = None                                             # None: a new random hole at every start; an int fixes it
 
 
-def is_road(r, c):
-    return r % STEP == 0 or c % STEP == 0
+def cell_of(row, col):
+    return row * GRID_SIZE + col
+
+
+def position_of(cell):
+    return divmod(cell, GRID_SIZE)
+
+
+def is_street(row, col):
+    return row % ROAD_SPACING == 0 or col % ROAD_SPACING == 0
+
+
+def is_intersection(row, col):
+    return row % ROAD_SPACING == 0 and col % ROAD_SPACING == 0
+
+
+def street_neighbor(row, col, direction):
+    """Cell next to (row, col) in a direction if it is a street cell, else -1."""
+    d_row, d_col = DIRECTION_DELTAS[direction]
+    row, col = row + d_row, col + d_col
+    inside = 0 <= row < GRID_SIZE and 0 <= col < GRID_SIZE
+    return cell_of(row, col) if inside and is_street(row, col) else -1
 
 
 class City:
     def __init__(self):
-        self.n_int = M * M
-        self.xy = [(i * STEP, j * STEP) for i in range(M) for j in range(M)]
-        self.nbr = [[-1] * 4 for _ in range(self.n_int)]
-        for i in range(M):
-            for j in range(M):
-                for d, (dr, dc) in enumerate(DRC):
-                    if 0 <= i + dr < M and 0 <= j + dc < M:
-                        self.nbr[i * M + j][d] = (i + dr) * M + j + dc
+        cells = range(GRID_SIZE * GRID_SIZE)
+        self.street_cells = [cell for cell in cells if is_street(*position_of(cell))]
+        self.intersections = [cell for cell in self.street_cells if is_intersection(*position_of(cell))]
+        self.intersection_index = {cell: index for index, cell in enumerate(self.intersections)}
+        self.n_intersections = len(self.intersections)
+        self.neighbor = {cell: [street_neighbor(*position_of(cell), d) for d in range(4)] for cell in self.street_cells}
+        self.valid_moves = {cell: [other >= 0 for other in others] for cell, others in self.neighbor.items()}
+        self.arms = [[self._arm(cell, direction) for direction in range(4)] for cell in self.intersections]
+        self.door_cell = [self._door_of(house) for house in DESTINATION_HOUSES]
+        self.hole_cell = self._random_hole_cell()
+        self.spawn_cells = [cell for cell in self.street_cells if self._is_on_border(cell)
+                            and cell not in self.intersection_index and cell != self.hole_cell]
+        self.hole = position_of(self.hole_cell)
 
-        self.lane_id, self.lane_from, self.lane_to, self.lane_dir = {}, [], [], []
-        self.out_lane = [[-1] * 4 for _ in range(self.n_int)]
-        self.in_lane = [[-1] * 4 for _ in range(self.n_int)]
-        for v in range(self.n_int):
-            for d in range(4):
-                w = self.nbr[v][d]
-                if w >= 0:
-                    self.out_lane[v][d] = self.lane_id[(v, w)] = len(self.lane_from)
-                    self.lane_from.append(v)
-                    self.lane_to.append(w)
-                    self.lane_dir.append(d)
-        for v in range(self.n_int):
-            for d in range(4):
-                if self.nbr[v][d] >= 0:
-                    self.in_lane[v][d] = self.lane_id[(self.nbr[v][d], v)]
-        self.n_lanes = len(self.lane_from)
+    def _random_hole_cell(self):
+        """Any street cell except intersections (traffic lights) and destination doors. A single hole never
+        disconnects the map: every street cell that remains still reaches an intersection."""
+        candidates = [cell for cell in self.street_cells
+                      if cell not in self.intersection_index and cell not in self.door_cell]
+        return random.Random(HOLE_SEED).choice(candidates)
 
-        self.segs = sorted(k for k in self.lane_id if k[0] < k[1])   # trechos (u < v)
-        self.seg_of_lane = [0] * self.n_lanes
-        for s, (u, v) in enumerate(self.segs):
-            self.seg_of_lane[self.lane_id[(u, v)]] = self.seg_of_lane[self.lane_id[(v, u)]] = s
+    def _arm(self, intersection_cell, direction):
+        """The street cells leaving an intersection in one direction, up to the next intersection."""
+        arm, cell = [], intersection_cell
+        while len(arm) < BLOCK_SIZE and self.neighbor[cell][direction] >= 0:
+            cell = self.neighbor[cell][direction]
+            arm.append(cell)
+        return arm
 
-        self.houses = self._houses()
-        self.dest_cell = [self._door_cells(self.houses[rc]) for rc in DEST_HOUSES]
-        self.border_lanes = [l for l in range(self.n_lanes) if self._on_border(l)]
-        self.holes = self._make_holes()          # [(trecho, posição)]
-        self.hole_cells = [self.cell_xy(self.lane_id[self.segs[s]], p) for s, p in self.holes]
-        self.blocked = {self.lane_id[self.segs[s]] * L + p for s, p in self.holes} | \
-                       {self.lane_id[self.segs[s][::-1]] * L + (L - 1 - p) for s, p in self.holes}
+    @staticmethod
+    def _door_of(house):
+        """A house's door is the street cell next to it; reaching it means arriving."""
+        for direction in range(4):
+            door = street_neighbor(*house, direction)
+            if door >= 0:
+                return door
+        raise ValueError(f"house {house} is not next to a street")
 
-    def _make_holes(self):
-        door_segs = {self.houses[rc][0] for rc in DEST_HOUSES}
-        eligible = [s for s, (u, v) in enumerate(self.segs)
-                    if self.lane_id[(u, v)] not in self.border_lanes and s not in door_segs]
-        n = round(HOLE_RATE * len(self.segs) * L)
-        rng = random.Random(HOLE_SEED)
-        while True:
-            segs = rng.sample(eligible, n)
-            if self._connected(set(range(len(self.segs))) - set(segs)):
-                return [(s, rng.randrange(L)) for s in sorted(segs)]
+    @staticmethod
+    def _is_on_border(cell):
+        row, col = position_of(cell)
+        return row in (0, GRID_SIZE - 1) or col in (0, GRID_SIZE - 1)
 
-    def _connected(self, open_segs):
-        seen, todo = {0}, [0]
-        while todo:
-            v = todo.pop()
-            for s in open_segs:
-                u, w = self.segs[s]
-                if v in (u, w) and (u if v == w else w) not in seen:
-                    seen.add(u if v == w else w)
-                    todo.append(u if v == w else w)
-        return len(seen) == self.n_int
+    def distance_to_door(self, cell, destination):
+        """Straight-line distance over the grid (|rows| + |cols|) from a cell to a destination's door. It ignores
+        blocks and the hole, so it points the way without giving the route away."""
+        (row, col), (door_row, door_col) = position_of(cell), position_of(self.door_cell[destination])
+        return abs(row - door_row) + abs(col - door_col)
 
-    def _on_border(self, lane):
-        (r1, c1), (r2, c2) = self.xy[self.lane_from[lane]], self.xy[self.lane_to[lane]]
-        return r1 == r2 in (0, SIZE - 1) or c1 == c2 in (0, SIZE - 1)
-
-    def cell_xy(self, lane, pos):
-        r, c = self.xy[self.lane_from[lane]]
-        dr, dc = DRC[self.lane_dir[lane]]
-        return r + dr * (pos + 1), c + dc * (pos + 1)
-
-    def road_cell(self, r, c):
-        i, j = r // STEP, c // STEP
-        if r % STEP == 0 and c % STEP != 0:
-            return self.segs.index((i * M + j, i * M + j + 1)), c - j * STEP - 1
-        if c % STEP == 0 and r % STEP != 0:
-            return self.segs.index((i * M + j, (i + 1) * M + j)), r - i * STEP - 1
-        return None
-
-    def _houses(self):
-        houses = {}
-        for r in range(SIZE):
-            for c in range(SIZE):
-                if not is_road(r, c):
-                    for dr, dc in DRC:
-                        door = self.road_cell(r + dr, c + dc)
-                        if door:
-                            houses[(r, c)] = door
-                            break
-        return houses
-
-    def _door_cells(self, door):
-        seg, p = door
-        u = self.segs[seg][0]
-        return [-1 if self.seg_of_lane[l] != seg else (p if self.lane_from[l] == u else L - 1 - p)
-                for l in range(self.n_lanes)]
-
-    def street_spawn(self, r, c, fx, fy):
-        door = self.road_cell(r, c)
-        if door is None:
-            return None
-        seg, p = door
-        u, v = self.segs[seg]
-        forward = fy > 0.5 if r % STEP == 0 else fx < 0.5      # leste ou sul = sentido u -> v
-        lane = self.lane_id[(u, v) if forward else (v, u)]
-        pos = self._door_cells((seg, p))[lane]
-        return None if lane * L + pos in self.blocked else (lane, pos)
+    def can_place_agent(self, cell):
+        """Agents may start on any street cell except intersections (traffic lights) and the hole."""
+        return cell in self.neighbor and cell not in self.intersection_index and cell != self.hole_cell
 
 
 CITY = City()
-assert all(rc in CITY.houses for rc in DEST_HOUSES), "destino deve ser uma casa com porta"

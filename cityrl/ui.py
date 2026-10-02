@@ -1,321 +1,366 @@
+"""Tkinter interface: train the agents and visualize chosen agents running the learned policy."""
 import threading
-import time
 import tkinter as tk
 from tkinter import messagebox, ttk
+from dataclasses import fields
+from typing import NamedTuple
 
-from .city import CITY, DEST_HOUSES, DRC, SIZE, is_road
-from .trainer import Hyper, Trainer
+from .city import CITY, DESTINATION_HOUSES, DESTINATION_NAMES, GRID_SIZE, cell_of, is_street, position_of
+from .simulator import CLOSED, EAST_WEST, NORTH_SOUTH
+from .trainer import Hyperparameters, Trainer
 
-CELL = 44
-EPOCHS = 100      # valor inicial do campo "Épocas"
-TICK_MS = 250     # visualização lenta dos agentes
-MAX_VIEW = 10     # máximo de agentes na visualização
-VIEW_EVERY = 10   # ao visualizar o treino, mostra 1 época a cada VIEW_EVERY
-TRAIN_TICK_S = 0.015   # pausa por tick nas épocas mostradas
-COLORS = ["#e6194b", "#3cb44b", "#4363d8", "#f58231"]
+CELL_PIXELS = 60
+DEFAULT_EPOCHS = 100
+DEFAULT_AGENTS_PER_EPOCH = 20
+MAX_VISUALIZED_AGENTS = 10
+VISUALIZATION_TICK_MS = 250         # slow motion when following the chosen agents
+
+DESTINATION_COLORS = ["#e6194b", "#3cb44b", "#4363d8", "#f58231"]
+STREET_COLOR, BLOCK_COLOR, HOLE_COLOR = "#d9d9d9", "#f3e9d2", "black"
 GREEN, RED = "#2ca02c", "#d62728"
-# hiperparâmetros na interface: grupo -> (campo de Hyper, rótulo, mínimo, máximo, passo)
-HP_FIELDS = {
-    "Semáforo": [("light_alpha", "α", 0.01, 1, 0.05), ("light_gamma", "γ", 0.1, 0.999, 0.05),
-                 ("light_eps", "ε inicial", 0.02, 1, 0.05), ("pca_k", "k do PCA", 1, 10, 1),
-                 ("pca_bins", "faixas/comp.", 2, 8, 1), ("min_pt", "ticks/decisão", 1, 20, 1)],
-    "Veículo": [("router_alpha", "α", 0.01, 1, 0.05), ("router_gamma", "γ", 0.1, 0.999, 0.01),
-                ("router_eps", "ε inicial", 0.02, 1, 0.05), ("propagation", "propagação retroativa", None, None, None),
-                ("omega", "ω (limite)", 0, 5, 0.05)],
-}
 
 
+def cell_center_pixels(cell):
+    row, col = position_of(cell)
+    return (col + 0.5) * CELL_PIXELS, (row + 0.5) * CELL_PIXELS
+
+
+def snapshot(simulation):
+    """What the map needs to draw one moment: signals and agents (x, y, destination, id)."""
+    cars = [(*cell_center_pixels(agent.cell), agent.destination, agent.id) for agent in simulation.agents.values()]
+    return dict(signal=list(simulation.signal), all_red=list(simulation.all_red_ticks), cars=cars)
+
+
+class SelectedAgent(NamedTuple):
+    cell: int
+    destination: int
+
+
+class TrainingProgress:
+    """Written by the training thread, read by the interface."""
+
+    def __init__(self, first_epoch):
+        self.first_epoch = first_epoch      # epochs trained before this run started
+        self.epochs_done = 0                # epochs finished in this run
+        self.last_record = None
+
+
+# ---------- map drawing ----------
+class MapView(tk.Canvas):
+    """The city: static map (streets, hole, destinations, traffic lights) plus a layer redrawn on every frame."""
+
+    def __init__(self, parent, on_click):
+        size = GRID_SIZE * CELL_PIXELS
+        super().__init__(parent, width=size, height=size, bg="white", highlightthickness=0)
+        self.bind("<Button-1>", lambda event: on_click(event.y // CELL_PIXELS, event.x // CELL_PIXELS))
+        self._draw_static_map()
+
+    def _square(self, row, col, margin=0, **options):
+        return self.create_rectangle(col * CELL_PIXELS + margin, row * CELL_PIXELS + margin,
+                                     (col + 1) * CELL_PIXELS - margin, (row + 1) * CELL_PIXELS - margin, **options)
+
+    def _draw_static_map(self):
+        for row in range(GRID_SIZE):
+            for col in range(GRID_SIZE):
+                self._square(row, col, fill=STREET_COLOR if is_street(row, col) else BLOCK_COLOR, outline="white")
+        self._square(*CITY.hole, fill=HOLE_COLOR, outline=HOLE_COLOR)
+        for index, (row, col) in enumerate(DESTINATION_HOUSES):
+            self._square(row, col, margin=2, fill=DESTINATION_COLORS[index], outline="black")
+            self.create_text((col + 0.5) * CELL_PIXELS, (row + 0.5) * CELL_PIXELS, text=DESTINATION_NAMES[index],
+                             fill="white", font=("Helvetica", 14, "bold"))
+        self._draw_signals([CLOSED] * CITY.n_intersections, [0] * CITY.n_intersections, tag="signals")
+
+    def _draw_signals(self, signal, all_red, tag):
+        """One bar per axis at every intersection: green where traffic flows, red otherwise."""
+        half = CELL_PIXELS / 2
+        for intersection, cell in enumerate(CITY.intersections):
+            x, y = cell_center_pixels(cell)
+            traffic_flows = all_red[intersection] == 0
+            east_west = GREEN if traffic_flows and signal[intersection] == EAST_WEST else RED
+            north_south = GREEN if traffic_flows and signal[intersection] == NORTH_SOUTH else RED
+            self.create_rectangle(x - half, y - 5, x + half, y + 5, fill=east_west, outline="", tags=tag)
+            self.create_rectangle(x - 5, y - half, x + 5, y + half, fill=north_south, outline="", tags=tag)
+            self.create_rectangle(x - 5, y - 5, x + 5, y + 5, fill="#333", outline="", tags=tag)
+
+    def clear_frame(self):
+        self.delete("frame")
+
+    def show_frame(self, frame):
+        """Draw signals and agents of one moment (replaces the previous frame)."""
+        self.clear_frame()
+        self._draw_signals(frame["signal"], frame["all_red"], tag="frame")
+        for x, y, destination, agent_id in frame["cars"]:
+            self.create_oval(x - 12, y - 12, x + 12, y + 12, fill=DESTINATION_COLORS[destination], outline="black",
+                             width=2, tags="frame")
+            self.create_text(x, y, text=str(agent_id + 1), fill="white", font=("Helvetica", 10, "bold"), tags="frame")
+
+    def show_selection(self, agents):
+        """Mark the chosen starting cells with a numbered square in the color of the agent's destination."""
+        self.delete("selection")
+        for number, agent in enumerate(agents, start=1):
+            row, col = position_of(agent.cell)
+            color = DESTINATION_COLORS[agent.destination]
+            self._square(row, col, margin=2, outline=color, width=3, tags="selection")
+            self.create_text(*cell_center_pixels(agent.cell), text=str(number), fill=color, tags="selection",
+                             font=("Helvetica", 11, "bold"))
+
+
+# ---------- application ----------
 class App:
     def __init__(self, root):
-        self.root, self.trainer = root, None      # o Trainer nasce no 1º treino, com os hiperparâmetros da tela
-        self.state = dict(epoch=0, last=None, start=0, frame=None)     # atualizado pela thread de treino
-        self.watching = False
-        self.training, self.animating, self.env, self.trails = False, False, None, {}
-        self.sel = []      # agentes escolhidos: dict(cell=(r, c), spawn=(faixa, pos), dest=k)
         root.title("CityRL")
+        self.root = root
+        self.trainer = None                     # created at the first training, with the hyperparameters on screen
+        self.progress = TrainingProgress(first_epoch=0)
+        self.total_epochs = DEFAULT_EPOCHS
+        self.is_training = self.is_animating = False
+        self.stop_requested = False             # read by the training thread
+        self.animation_job = None               # pending `after` call of the animation
+        self.selection = []                     # SelectedAgent list, one per cell
+        self.simulation = None                  # the simulation being visualized
 
-        n = SIZE * CELL
-        self.canvas = tk.Canvas(root, width=n, height=n, bg="white", highlightthickness=0)
-        self.canvas.grid(row=0, column=0, padx=8, pady=8)
-        self.canvas.bind("<Button-1>", self.pick_spawn)
-        self.draw_map()
-
+        self.map = MapView(root, on_click=self._on_map_click)
+        self.map.grid(row=0, column=0, padx=8, pady=8)
         side = ttk.Frame(root)
         side.grid(row=0, column=1, sticky="n", padx=(0, 8), pady=8)
-        row = ttk.Frame(side)
-        row.pack(anchor="w")
-        ttk.Label(row, text="Agentes por época").grid(row=0, column=0, sticky="w")
-        ttk.Label(row, text="Épocas").grid(row=0, column=1, sticky="w", padx=(12, 0))
-        self.agents, self.epochs = tk.IntVar(value=300), tk.IntVar(value=EPOCHS)
-        ttk.Spinbox(row, from_=10, to=1000, increment=50, textvariable=self.agents, width=8).grid(row=1, column=0)
-        ttk.Spinbox(row, from_=1, to=10000, increment=50, textvariable=self.epochs, width=8).grid(row=1, column=1, padx=(12, 0))
-        self.total = EPOCHS      # total da execução atual
-        self.build_hyper_panel(side)
-        row = ttk.Frame(side)
-        row.pack(fill="x", pady=8)
-        self.train_btn = ttk.Button(row, text="Treinar", command=self.train)
-        self.train_btn.pack(side="left", expand=True, fill="x")
-        self.new_btn = ttk.Button(row, text="Novo treino", command=self.new_run)
-        self.new_btn.pack(side="left", expand=True, fill="x")
-        self.epoch_lbl = ttk.Label(side, text=f"Época 0 / {self.total}", font=("Helvetica", 14, "bold"))
-        self.epoch_lbl.pack(anchor="w")
-        self.progress = ttk.Progressbar(side, maximum=self.total)
-        self.progress.pack(fill="x", pady=4)
-        self.watch_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(side, text=f"Visualizar o treino (1 época a cada {VIEW_EVERY})", variable=self.watch_var,
-                        command=lambda: setattr(self, "watching", self.watch_var.get())).pack(anchor="w")
-        self.info_lbl = ttk.Label(side, text="", justify="left")
-        self.info_lbl.pack(anchor="w")
+        self._build_run_settings(side)
+        self._build_hyperparameter_panel(side)
+        self._build_training_controls(side)
+        self._build_visualization_controls(side)
+        self.status_label.config(text="Train before visualizing.")
+        self._toggle_agent(0, 7)                # initial agent: top street, destination A
 
-        ttk.Separator(side).pack(fill="x", pady=10)
-        ttk.Label(side, text=f"Visualizar agentes (até {MAX_VIEW})").pack(anchor="w")
-        row = ttk.Frame(side)
+    # ---------- building the panel ----------
+    def _build_run_settings(self, parent):
+        row = ttk.Frame(parent)
         row.pack(anchor="w")
-        ttk.Label(row, text="Destino").pack(side="left")
-        self.dest = tk.StringVar(value="A")
-        ttk.Combobox(row, textvariable=self.dest, values=list("ABCD"), state="readonly", width=3).pack(side="left", padx=4)
-        self.view_btn = ttk.Button(side, text="Visualizar", command=self.visualize, state="disabled")
-        self.view_btn.pack(fill="x", pady=(8, 2))
-        ttk.Button(side, text="Limpar agentes", command=self.clear_agents).pack(fill="x")
-        self.status = ttk.Label(side, text="", foreground="#555", wraplength=200)
-        self.status.pack(anchor="w")
-        self.status.config(text="Treine antes de visualizar.")
-        self.toggle_agent(0, 7, 0.5, 0.75)   # agente inicial: rua do topo, sentido leste, destino A
+        self.agents_var, self.epochs_var = tk.IntVar(value=DEFAULT_AGENTS_PER_EPOCH), tk.IntVar(value=DEFAULT_EPOCHS)
+        ttk.Label(row, text="Agents per epoch").grid(row=0, column=0, sticky="w")
+        ttk.Label(row, text="Epochs").grid(row=0, column=1, sticky="w", padx=(12, 0))
+        ttk.Spinbox(row, from_=1, to=500, increment=5, textvariable=self.agents_var, width=8).grid(row=1, column=0)
+        ttk.Spinbox(row, from_=1, to=10000, increment=50, textvariable=self.epochs_var, width=8).grid(
+            row=1, column=1, padx=(12, 0))
 
-    def build_hyper_panel(self, parent):
-        defaults = Hyper()
-        self.hvars, self.hp_widgets = {}, []
-        box = ttk.LabelFrame(parent, text="Hiperparâmetros")
+    def _build_hyperparameter_panel(self, parent):
+        """One widget per field of `Hyperparameters`, grouped in columns by the group declared in the field."""
+        self.hyperparameter_vars, self.hyperparameter_widgets = {}, []
+        groups = {}
+        for setting in fields(Hyperparameters):
+            groups.setdefault(setting.metadata["group"], []).append(setting)
+        box = ttk.LabelFrame(parent, text="Hyperparameters")
         box.pack(fill="x", pady=(8, 0))
-        for col, (group, fields) in enumerate(HP_FIELDS.items()):
+        for column, (group, settings) in enumerate(groups.items()):
             frame = ttk.Frame(box)
-            frame.grid(row=0, column=col, sticky="n", padx=6, pady=4)
+            frame.grid(row=0, column=column, sticky="n", padx=6, pady=4)
             ttk.Label(frame, text=group, font=("Helvetica", 11, "bold")).grid(row=0, column=0, columnspan=2, sticky="w")
-            for r, (name, label, lo, hi, step) in enumerate(fields, start=1):
-                default = getattr(defaults, name)
-                if isinstance(default, bool):
-                    var = tk.BooleanVar(value=default)
-                    w = ttk.Checkbutton(frame, text=label, variable=var)
-                    w.grid(row=r, column=0, columnspan=2, sticky="w")
-                else:
-                    var = tk.IntVar(value=default) if isinstance(default, int) else tk.DoubleVar(value=default)
-                    ttk.Label(frame, text=label).grid(row=r, column=0, sticky="w")
-                    w = ttk.Spinbox(frame, from_=lo, to=hi, increment=step, textvariable=var, width=6)
-                    w.grid(row=r, column=1, padx=(6, 0))
-                self.hvars[name] = var
-                self.hp_widgets.append(w)
-
-    def read_hyper(self):
-        try:
-            return Hyper(**{name: var.get() for name, var in self.hvars.items()})
-        except tk.TclError:
-            messagebox.showerror("Hiperparâmetros", "Há um valor inválido nos hiperparâmetros.")
-            return None
-
-    def set_hyper_state(self, enabled):
-        for w in self.hp_widgets:
-            w.config(state="normal" if enabled else "disabled")
-
-    def draw_map(self):
-        cv = self.canvas
-        for r in range(SIZE):
-            for c in range(SIZE):
-                cv.create_rectangle(c * CELL, r * CELL, (c + 1) * CELL, (r + 1) * CELL, outline="white",
-                                    fill="#d9d9d9" if is_road(r, c) else "#f3e9d2")
-        for (r, c) in CITY.hole_cells:      # buracos: quadrado preto que ocupa a célula toda
-            cv.create_rectangle(c * CELL, r * CELL, (c + 1) * CELL, (r + 1) * CELL, fill="black", outline="black")
-        for (r, c) in CITY.houses:
-            if (r, c) in DEST_HOUSES:
-                k = DEST_HOUSES.index((r, c))
-                cv.create_rectangle(c * CELL + 2, r * CELL + 2, (c + 1) * CELL - 2, (r + 1) * CELL - 2,
-                                    fill=COLORS[k], outline="black")
-                cv.create_text((c + .5) * CELL, (r + .5) * CELL, text="ABCD"[k], fill="white",
-                               font=("Helvetica", 12, "bold"))
-
-    def draw_dynamic(self, frame):
-        cv = self.canvas
-        cv.delete("dyn")
-        for v, (r, c) in enumerate(CITY.xy):
-            x, y, go = (c + .5) * CELL, (r + .5) * CELL, frame["red"][v] == 0
-            cv.create_rectangle(x - CELL / 2, y - 4, x + CELL / 2, y + 4, tags="dyn", outline="",
-                                fill=GREEN if go and frame["phase"][v] == 0 else RED)
-            cv.create_rectangle(x - 4, y - CELL / 2, x + 4, y + CELL / 2, tags="dyn", outline="",
-                                fill=GREEN if go and frame["phase"][v] == 1 else RED)
-            cv.create_rectangle(x - 4, y - 4, x + 4, y + 4, fill="#333", outline="", tags="dyn")
-        for color, pts in self.trails.values():
-            if len(pts) > 1:
-                cv.create_line(*[q for p in pts for q in p], fill=color, width=3, dash=(2, 3), tags="dyn")
-        for x, y, dest, vid in frame["cars"]:
-            cv.create_oval(x - 9, y - 9, x + 9, y + 9, fill=COLORS[dest], outline="black", width=2, tags="dyn")
-            cv.create_text(x, y, text=str(vid + 1), fill="white", font=("Helvetica", 9, "bold"), tags="dyn")
-
-    @classmethod
-    def frame_of(cls, env):
-        return dict(phase=list(env.phase), red=list(env.red),
-                    cars=[(*cls.car_xy(v), v.dest, v.id) for v in list(env.active.values())])
+            for row, setting in enumerate(settings, start=1):
+                widget, variable = self._hyperparameter_widget(frame, row, setting)
+                self.hyperparameter_vars[setting.name] = variable
+                self.hyperparameter_widgets.append(widget)
 
     @staticmethod
-    def lane_xy(lane, pos):
-        r, c = CITY.cell_xy(lane, pos)
-        dr, dc = DRC[CITY.lane_dir[lane]]
-        return (c + .5 - 0.22 * dr) * CELL, (r + .5 + 0.22 * dc) * CELL
+    def _hyperparameter_widget(frame, row, setting):
+        label = setting.metadata["label"]
+        if setting.type is bool:
+            variable = tk.BooleanVar(value=setting.default)
+            widget = ttk.Checkbutton(frame, text=label, variable=variable)
+            widget.grid(row=row, column=0, columnspan=2, sticky="w")
+            return widget, variable
+        variable = tk.IntVar(value=setting.default) if setting.type is int else tk.DoubleVar(value=setting.default)
+        minimum, maximum, step = setting.metadata["range"]
+        ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w")
+        widget = ttk.Spinbox(frame, from_=minimum, to=maximum, increment=step, textvariable=variable, width=6)
+        widget.grid(row=row, column=1, padx=(6, 0))
+        return widget, variable
 
-    @classmethod
-    def car_xy(cls, veh):
-        return cls.lane_xy(veh.lane, veh.pos)
+    def _build_training_controls(self, parent):
+        buttons = ttk.Frame(parent)
+        buttons.pack(fill="x", pady=8)
+        self.train_button = ttk.Button(buttons, text="Train", command=self._start_training)
+        self.train_button.pack(side="left", expand=True, fill="x")
+        self.new_run_button = ttk.Button(buttons, text="New run", command=self._new_run)
+        self.new_run_button.pack(side="left", expand=True, fill="x")
+        self.stop_button = ttk.Button(buttons, text="Stop", command=self._stop, state="disabled")
+        self.stop_button.pack(side="left", expand=True, fill="x")
+        self.epoch_label = ttk.Label(parent, text=f"Epoch 0 / {self.total_epochs}", font=("Helvetica", 14, "bold"))
+        self.epoch_label.pack(anchor="w")
+        self.progress_bar = ttk.Progressbar(parent, maximum=self.total_epochs)
+        self.progress_bar.pack(fill="x", pady=4)
+        self.metrics_label = ttk.Label(parent, text="", justify="left")
+        self.metrics_label.pack(anchor="w")
 
-    def train(self):
-        if self.training:
-            return
-        if self.trainer is None:  # 1º treino de uma execução: fixa os hiperparâmetros
-            hp = self.read_hyper()
-            if hp is None:
-                return
-            self.trainer = Trainer(hp)
-            self.set_hyper_state(False)
-        self.training = True
-        self.total = max(1, int(self.epochs.get()))
-        self.progress.config(maximum=self.total)
-        self.epoch_lbl.config(text=f"Época 0 / {self.total}")
-        self.state.update(epoch=0, last=None, start=self.trainer.epoch, frame=None)   # contador da execução atual
-        self.canvas.delete("dyn")
-        self.env, self.trails = None, {}
-        self.train_btn.config(state="disabled")
-        self.new_btn.config(state="disabled")
-        self.view_btn.config(state="disabled")
-        threading.Thread(target=self._train_worker, args=(int(self.agents.get()), self.total), daemon=True).start()
-        self._poll()
-        self._draw_training()
+    def _build_visualization_controls(self, parent):
+        ttk.Separator(parent).pack(fill="x", pady=10)
+        ttk.Label(parent, text=f"Visualize agents (up to {MAX_VISUALIZED_AGENTS})").pack(anchor="w")
+        row = ttk.Frame(parent)
+        row.pack(anchor="w")
+        ttk.Label(row, text="Destination").pack(side="left")
+        self.destination_var = tk.StringVar(value=DESTINATION_NAMES[0])
+        ttk.Combobox(row, textvariable=self.destination_var, values=list(DESTINATION_NAMES), state="readonly",
+                     width=3).pack(side="left", padx=4)
+        self.visualize_button = ttk.Button(parent, text="Visualize", command=self._start_visualization, state="disabled")
+        self.visualize_button.pack(fill="x", pady=(8, 2))
+        ttk.Button(parent, text="Clear agents", command=self._clear_agents).pack(fill="x")
+        self.status_label = ttk.Label(parent, text="", foreground="#555", wraplength=200)
+        self.status_label.pack(anchor="w")
 
-    def _train_worker(self, n_agents, epochs):
-        def on_epoch(rec, total):
-            self.state.update(epoch=rec["epoch"] - self.state["start"], last=rec)
+    # ---------- small helpers ----------
+    def _set_buttons(self, train, new_run, visualize, stop=False):
+        for button, enabled in ((self.train_button, train), (self.new_run_button, new_run),
+                                (self.visualize_button, visualize), (self.stop_button, stop)):
+            button.config(state="normal" if enabled else "disabled")
 
-        def watch(env, epoch):     # roda na thread de treino, a cada tick
-            if self.watching and (epoch - self.state["start"] - 1) % VIEW_EVERY == 0:
-                self.state["frame"] = dict(self.frame_of(env), epoch=epoch - self.state["start"])
-                time.sleep(TRAIN_TICK_S)
-            else:
-                self.state["frame"] = None
+    def _is_trained(self):
+        return self.trainer is not None and self.trainer.epochs_done > 0
+
+    def _read_hyperparameters(self):
         try:
-            self.trainer.train(epochs, n_agents, on_epoch, watch=watch)
+            return Hyperparameters(**{field: var.get() for field, var in self.hyperparameter_vars.items()})
+        except tk.TclError:
+            messagebox.showerror("Hyperparameters", "A hyperparameter has an invalid value.")
+            return None
+
+    def _set_hyperparameters_enabled(self, enabled):
+        for widget in self.hyperparameter_widgets:
+            widget.config(state="normal" if enabled else "disabled")
+
+    def _reset_visualization(self):
+        self.map.clear_frame()
+        self.simulation = None
+
+    # ---------- training ----------
+    def _start_training(self):
+        if self.is_training:
+            return
+        if self.trainer is None:                # first training of a run: fix the hyperparameters
+            hyperparameters = self._read_hyperparameters()
+            if hyperparameters is None:
+                return
+            self.trainer = Trainer(hyperparameters)
+            self._set_hyperparameters_enabled(False)
+        self.is_training, self.stop_requested = True, False
+        self.total_epochs = max(1, int(self.epochs_var.get()))
+        self.progress = TrainingProgress(first_epoch=self.trainer.epochs_done)
+        self.progress_bar.config(maximum=self.total_epochs)
+        self.epoch_label.config(text=f"Epoch 0 / {self.total_epochs}")
+        self._reset_visualization()
+        self._set_buttons(train=False, new_run=False, visualize=False, stop=True)
+        threading.Thread(target=self._train_in_background, args=(int(self.agents_var.get()), self.total_epochs),
+                         daemon=True).start()
+        self._poll_training()
+
+    def _train_in_background(self, n_agents, epochs):
+        progress = self.progress
+
+        def on_epoch(record):
+            progress.epochs_done = record["epoch"] - progress.first_epoch
+            progress.last_record = record
+
+        try:
+            self.trainer.train(epochs, n_agents, on_epoch, should_stop=lambda: self.stop_requested)
         finally:
-            self.training = False
+            self.is_training = False
 
-    def _draw_training(self):
-        frame = self.state["frame"]
-        if frame and self.training:
-            self.draw_dynamic(frame)
-            self.status.config(text=f"Visualizando a época {frame['epoch']}")
+    def _poll_training(self):
+        still_training = self.is_training       # read first: the last epoch is stored before the thread ends
+        progress, record = self.progress, self.progress.last_record
+        self.epoch_label.config(text=f"Epoch {progress.epochs_done} / {self.total_epochs}")
+        self.progress_bar.config(value=progress.epochs_done)
+        if record:
+            self.metrics_label.config(text=f"arrived: {record['arrived']}/{record['agents_created']}\n"
+                                           f"mean trip: {record['mean_trip_ticks']} ticks\n"
+                                           f"mean wait: {record['mean_wait_ticks']} ticks\n"
+                                           f"hole hits: {record['hole_hits']}\n"
+                                           f"epoch length: {record['makespan_ticks']} ticks\n"
+                                           f"epoch time: {record['seconds']} s")
+        if still_training:
+            self.root.after(200, self._poll_training)
         else:
-            self.canvas.delete("dyn")
-        if self.training:
-            self.root.after(40, self._draw_training)
+            self._set_buttons(train=True, new_run=True, visualize=self._is_trained())
+            if not self.stop_requested:
+                message = "Run saved to results/training.json"
+            elif progress.epochs_done == 0:
+                message = "Stopped before the first epoch finished: nothing saved."
+            else:
+                message = f"Stopped after {progress.epochs_done} epochs. Run saved to results/training.json"
+            self.status_label.config(text=message)
 
-    def _poll(self):
-        running = self.training          # ler antes: o estado final é gravado antes de a thread encerrar
-        st, last = self.state, self.state["last"]
-        self.epoch_lbl.config(text=f"Época {st['epoch']} / {self.total}")
-        self.progress.config(value=st["epoch"])
-        if last:
-            self.info_lbl.config(text=f"chegaram: {last['arrived']}/{last['n_agents']}\n"
-                                      f"viagem média: {last['mean_trip_ticks']} ticks\n"
-                                      f"espera média: {last['mean_wait_ticks']} ticks\n"
-                                      f"duração da época: {last['makespan_ticks']} ticks")
-        if running:
-            self.root.after(200, self._poll)
+    def _new_run(self):
+        """Discard the learned policy and unlock the hyperparameters: the next training is a new run."""
+        if self.is_training or self.is_animating:
+            return
+        self.trainer = None
+        self.progress = TrainingProgress(first_epoch=0)
+        self._reset_visualization()
+        self.epoch_label.config(text=f"Epoch 0 / {self.total_epochs}")
+        self.progress_bar.config(value=0)
+        self.metrics_label.config(text="")
+        self._set_buttons(train=True, new_run=True, visualize=False)
+        self._set_hyperparameters_enabled(True)
+        self.status_label.config(text="New run: adjust the hyperparameters and train before visualizing.")
+
+    def _stop(self):
+        """Stop whatever is running: the training (after discarding the unfinished epoch) or the animation."""
+        if self.is_training:
+            self.stop_requested = True
+            self.status_label.config(text="Stopping...")
+            self.stop_button.config(state="disabled")
+        elif self.is_animating:
+            self.root.after_cancel(self.animation_job)
+            self.is_animating = False
+            self.status_label.config(text=f"Stopped at tick {self.simulation.time}.")
+            self._set_buttons(train=True, new_run=True, visualize=True)
+
+    # ---------- choosing agents ----------
+    def _on_map_click(self, row, col):
+        if not self.is_animating:
+            self._toggle_agent(row, col)
+
+    def _toggle_agent(self, row, col):
+        """Click on a street cell: add an agent there (with the chosen destination) or remove the one already there."""
+        cell = cell_of(row, col)
+        if not CITY.can_place_agent(cell):
+            return
+        destination = DESTINATION_NAMES.index(self.destination_var.get())
+        already_there = [agent for agent in self.selection if agent.cell == cell]
+        if already_there:
+            self.selection.remove(already_there[0])
+        elif len(self.selection) < MAX_VISUALIZED_AGENTS and CITY.door_cell[destination] != cell:
+            self.selection.append(SelectedAgent(cell, destination))
         else:
-            self.train_btn.config(state="normal")
-            self.new_btn.config(state="normal")
-            self.view_btn.config(state="normal" if self.trained() else "disabled")
-            self.status.config(text="Execução salva em results/training.json")
-
-    def trained(self):
-        return self.trainer is not None and self.trainer.epoch > 0
-
-    def new_run(self):
-        if self.training or self.animating:
             return
-        self.trainer, self.env, self.trails = None, None, {}
-        self.state.update(epoch=0, last=None, start=0, frame=None)
-        self.epoch_lbl.config(text=f"Época 0 / {self.total}")
-        self.progress.config(value=0)
-        self.info_lbl.config(text="")
-        self.canvas.delete("dyn")
-        self.view_btn.config(state="disabled")
-        self.set_hyper_state(True)
-        self.status.config(text="Nova execução: ajuste os hiperparâmetros e treine antes de visualizar.")
+        self._reset_visualization()
+        self.map.show_selection(self.selection)
 
-    def pick_spawn(self, event):
-        if not self.animating:
-            self.toggle_agent(event.y // CELL, event.x // CELL, (event.x % CELL) / CELL, (event.y % CELL) / CELL)
+    def _clear_agents(self):
+        if not self.is_animating:
+            self.selection = []
+            self._reset_visualization()
+            self.map.show_selection(self.selection)
 
-    def toggle_agent(self, r, c, fx=0.5, fy=0.5):
-        spawn = CITY.street_spawn(r, c, fx, fy)
-        if spawn is None:
+    # ---------- visualization ----------
+    def _start_visualization(self):
+        if not self.selection or not self._is_trained():
             return
-        dest = "ABCD".index(self.dest.get())
-        same = [a for a in self.sel if a["spawn"] == spawn]
-        if same:
-            self.sel.remove(same[0])
-        elif len(self.sel) < MAX_VIEW and CITY.dest_cell[dest][spawn[0]] != spawn[1]:   # não nasce já no destino
-            self.sel.append(dict(cell=(r, c), spawn=spawn, dest=dest))
-        else:
-            return
-        self.canvas.delete("dyn")
-        self.env, self.trails = None, {}
-        self.draw_marks()
-
-    def clear_agents(self):
-        if not self.animating:
-            self.sel = []
-            self.canvas.delete("dyn")
-            self.env, self.trails = None, {}
-            self.draw_marks()
-
-    def draw_marks(self):
-        self.canvas.delete("origin")
-        for i, a in enumerate(self.sel):
-            r, c = a["cell"]
-            x0, y0, x1, y1 = c * CELL + 1, r * CELL + 1, (c + 1) * CELL - 1, (r + 1) * CELL - 1
-            d = CITY.lane_dir[a["spawn"][0]]      # marca só a metade da célula onde fica a faixa escolhida
-            if d == 1: y0 = (r + .5) * CELL
-            elif d == 3: y1 = (r + .5) * CELL
-            elif d == 2: x1 = (c + .5) * CELL
-            else: x0 = (c + .5) * CELL
-            self.canvas.create_rectangle(x0, y0, x1, y1, outline=COLORS[a["dest"]], width=3, tags="origin")
-            self.canvas.create_text((x0 + x1) / 2, (y0 + y1) / 2, text=str(i + 1), tags="origin",
-                                    fill=COLORS[a["dest"]], font=("Helvetica", 9, "bold"))
-
-    def visualize(self):
-        if not self.sel or not self.trained():
-            return
-        self.env = self.trainer.agents_env([(a["spawn"][0], a["spawn"][1], a["dest"]) for a in self.sel])
-        self.env._spawn()
-        self.trails = {}
-        self._record_trails()
-        self.animating = True
-        for b in (self.train_btn, self.new_btn, self.view_btn):
-            b.config(state="disabled")
+        agents = [(agent.cell, agent.destination) for agent in self.selection]
+        self.simulation = self.trainer.simulation_for_agents(agents)
+        self.simulation.spawn_due_agents()
+        self.is_animating = True
+        self._set_buttons(train=False, new_run=False, visualize=False, stop=True)
         self._animate()
 
-    def _record_trails(self):
-        for veh in self.env.active.values():
-            self.trails.setdefault(veh.id, (COLORS[veh.dest], []))[1].append(self.car_xy(veh))
-
     def _animate(self):
-        env = self.env
-        self.trainer.step(env)
-        self._record_trails()
-        self.draw_dynamic(self.frame_of(env))
-        self.status.config(text=f"tick {env.t}  |  na via: {len(env.active)}")
-        if env.done():
-            self.status.config(text=f"{len(env.finished)}/{len(self.sel)} agentes chegaram em {env.t} ticks.")
-            self.animating = False
-            for b in (self.train_btn, self.new_btn, self.view_btn):
-                b.config(state="normal")
-            return
-        self.root.after(TICK_MS, self._animate)
+        simulation = self.simulation
+        self.trainer.step(simulation)
+        self.map.show_frame(snapshot(simulation))
+        self.status_label.config(text=f"tick {simulation.time}  |  on the map: {len(simulation.agents)}")
+        if simulation.is_done():
+            self.status_label.config(
+                text=f"{len(simulation.trips)}/{len(self.selection)} agents arrived in {simulation.time} ticks.")
+            self.is_animating = False
+            self._set_buttons(train=True, new_run=True, visualize=True)
+        else:
+            self.animation_job = self.root.after(VISUALIZATION_TICK_MS, self._animate)
 
 
 def main():
