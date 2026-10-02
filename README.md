@@ -27,8 +27,8 @@ avoid the hole faster.
 uv run python main.py
 ```
 
-Everything is controlled in the interface: agents per epoch, epochs, hyperparameters, training and visualization of up
-to 10 agents (click on a street cell to add or remove one; intersections, the hole and houses are not allowed).
+Everything is controlled in the interface: agents per epoch, epochs, hyperparameters, training (optionally watching
+one epoch in ten, in slow motion), and visualization of up to 10 agents (click on a street cell to add or remove one; intersections, the hole and houses are not allowed).
 The traffic lights are always drawn.
 
 ## Comparing hyperparameters

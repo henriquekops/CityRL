@@ -1,5 +1,6 @@
 """Tkinter interface: train the agents and visualize chosen agents running the learned policy."""
 import threading
+import time
 import tkinter as tk
 from tkinter import messagebox, ttk
 from dataclasses import fields
@@ -14,6 +15,8 @@ DEFAULT_EPOCHS = 100
 DEFAULT_AGENTS_PER_EPOCH = 20
 MAX_VISUALIZED_AGENTS = 10
 VISUALIZATION_TICK_MS = 300         # slow motion when following the chosen agents
+WATCH_EVERY_N_EPOCHS = 10           # when watching the training, show one epoch out of this many
+WATCH_TICK_DELAY_S = 0.015          # pause per tick in the epochs that are shown
 
 DESTINATION_COLORS = ["#e6194b", "#3cb44b", "#4363d8", "#f58231"]
 STREET_COLOR, BLOCK_COLOR, HOLE_COLOR = "#d9d9d9", "#f3e9d2", "black"
@@ -43,6 +46,7 @@ class TrainingProgress:
         self.first_epoch = first_epoch      # epochs trained before this run started
         self.epochs_done = 0                # epochs finished in this run
         self.last_record = None
+        self.snapshot = None                # moment of the epoch being watched, if any
 
 
 # ---------- map drawing ----------
@@ -115,6 +119,7 @@ class App:
         self.total_epochs = DEFAULT_EPOCHS
         self.is_training = self.is_animating = False
         self.stop_requested = False             # read by the training thread
+        self.watching_training = False          # read by the training thread
         self.animation_job = None               # pending `after` call of the animation
         self.selection = []                     # SelectedAgent list, one per cell
         self.simulation = None                  # the simulation being visualized
@@ -186,6 +191,9 @@ class App:
         self.epoch_label.pack(anchor="w")
         self.progress_bar = ttk.Progressbar(parent, maximum=self.total_epochs)
         self.progress_bar.pack(fill="x", pady=4)
+        self.watch_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(parent, text=f"Watch the training (1 epoch in {WATCH_EVERY_N_EPOCHS})", variable=self.watch_var,
+                        command=lambda: setattr(self, "watching_training", self.watch_var.get())).pack(anchor="w")
         self.metrics_label = ttk.Label(parent, text="", justify="left")
         self.metrics_label.pack(anchor="w")
 
@@ -248,6 +256,7 @@ class App:
         threading.Thread(target=self._train_in_background, args=(int(self.agents_var.get()), self.total_epochs),
                          daemon=True).start()
         self._poll_training()
+        self._draw_watched_epoch()
 
     def _train_in_background(self, n_agents, epochs):
         progress = self.progress
@@ -257,9 +266,29 @@ class App:
             progress.last_record = record
 
         try:
-            self.trainer.train(epochs, n_agents, on_epoch, should_stop=lambda: self.stop_requested)
+            self.trainer.train(epochs, n_agents, on_epoch, should_stop=lambda: self.stop_requested,
+                               on_tick=self._on_training_tick)
         finally:
             self.is_training = False
+
+    def _on_training_tick(self, simulation, epoch_number):
+        """Runs in the training thread after every tick: keep a snapshot of the epochs that are being watched."""
+        epoch_in_run = epoch_number - self.progress.first_epoch
+        if self.watching_training and (epoch_in_run - 1) % WATCH_EVERY_N_EPOCHS == 0:
+            self.progress.snapshot = dict(snapshot(simulation), epoch=epoch_in_run)
+            time.sleep(WATCH_TICK_DELAY_S)
+        else:
+            self.progress.snapshot = None
+
+    def _draw_watched_epoch(self):
+        watched = self.progress.snapshot
+        if watched and self.is_training:
+            self.map.show_frame(watched)
+            self.status_label.config(text=f"Watching epoch {watched['epoch']}")
+        else:
+            self.map.clear_frame()
+        if self.is_training:
+            self.root.after(40, self._draw_watched_epoch)
 
     def _poll_training(self):
         still_training = self.is_training       # read first: the last epoch is stored before the thread ends

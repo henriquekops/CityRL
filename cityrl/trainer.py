@@ -46,18 +46,17 @@ class Trainer:
         return len(self.history)
 
     # ---------- training ----------
-    def train(self, epochs, n_agents, on_epoch=None, should_stop=lambda: False):
+    def train(self, epochs, n_agents, on_epoch=None, should_stop=lambda: False, on_tick=None):
         """Train for `epochs` epochs of `n_agents` agents each, then save the run.
-        `on_epoch(record)` is called after each epoch. When `should_stop()` turns true, training stops right away:
-        the unfinished epoch is discarded (it is not recorded) and the finished ones are saved."""
+        `on_epoch(record)` is called after each epoch, and `on_tick(simulation, epoch_number)` after each tick (for
+        showing the training; the time it takes is not counted in `seconds`). When `should_stop()` turns true,
+        training stops right away: the unfinished epoch is discarded (it is not recorded) and the finished ones are saved."""
         for epoch_index in range(epochs):
             self._set_exploration(epoch_index, epochs)
             simulation = self._new_simulation(n_agents, seed=self.epochs_done)    # same seed per epoch in every run
-            started = time.perf_counter()
-            self._run_epoch(simulation, learning=True, should_stop=should_stop)
+            seconds = self._run_epoch(simulation, learning=True, should_stop=should_stop, on_tick=on_tick)
             if should_stop():
                 break
-            seconds = time.perf_counter() - started
             self.history.append(self._epoch_record(simulation, n_agents, seconds))
             if on_epoch:
                 on_epoch(self.history[-1])
@@ -73,11 +72,18 @@ class Trainer:
     def _new_simulation(self, n_agents, seed):
         return Simulation(random_arrivals(n_agents, seed), self.hyperparameters.decision_period)
 
-    def _run_epoch(self, simulation, learning, should_stop=lambda: False):
+    def _run_epoch(self, simulation, learning, should_stop=lambda: False, on_tick=None):
+        """Run an epoch to its end; returns the seconds spent computing ticks (not counting `on_tick`)."""
         self.router.learning = learning
         self.light_agent.start_episode()
+        seconds = 0.0
         while not simulation.is_done() and not should_stop():
+            started = time.perf_counter()
             self.step(simulation, learning)
+            seconds += time.perf_counter() - started
+            if on_tick:
+                on_tick(simulation, self.epochs_done + 1)
+        return seconds
 
     def step(self, simulation, learning=False):
         """One tick: the traffic lights decide when it is time, then the simulator moves the agents."""
@@ -94,7 +100,7 @@ class Trainer:
             mean_wait_ticks=round(simulation.mean_wait_ticks(), 2),
             makespan_ticks=simulation.time,                          # ticks until the last agent left
             cumulative_ticks=sum(r["makespan_ticks"] for r in self.history) + simulation.time,
-            seconds=round(seconds, 2),                               # wall-clock time of the epoch
+            seconds=round(seconds, 2),                               # time spent computing the epoch's ticks
             light_epsilon=round(self.light_agent.epsilon, 3), router_epsilon=round(self.router.epsilon, 3))
 
     # ---------- visualization ----------
