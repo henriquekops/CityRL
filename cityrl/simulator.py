@@ -3,12 +3,9 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .city import CITY, DESTINATION_HOUSES, EAST, NORTH, SOUTH, WEST
+from .city import CITY, EAST, NORTH, SOUTH, WEST
 
-SPAWN_WINDOW_TICKS = 100
 DEFAULT_DECISION_PERIOD = 3
-MAX_TICKS = 1500
-MAX_AGENTS_ON_MAP = 30
 STEP_REWARD = -1
 HOLE_PENALTY = 10
 DISTANCE_REWARD = 0.5
@@ -26,8 +23,8 @@ class Arrival:
 def random_arrivals(n_agents, seed):
     rng = np.random.default_rng(seed)
     arrivals = []
-    for tick in sorted(rng.integers(0, SPAWN_WINDOW_TICKS, n_agents)):
-        destination = int(rng.integers(len(DESTINATION_HOUSES)))
+    for tick in sorted(rng.integers(0, CITY.scenario.spawn_window_ticks, n_agents)):
+        destination = int(rng.integers(CITY.n_destinations))
         cell = int(rng.choice(CITY.spawn_cells))
         if cell != CITY.door_cell[destination]:
             arrivals.append(Arrival(int(tick), destination, cell))
@@ -43,6 +40,7 @@ class Agent:
         self.id, self.destination, self.cell, self.spawn_tick = agent_id, destination, cell, spawn_tick
         self.previous_cell = cell
         self.wait_ticks = 0
+        self.stuck_ticks = 0
         self.last_decision = None
 
 
@@ -60,6 +58,8 @@ class Simulation:
         self.next_agent_id = 0
         self.trips = []
         self.hole_hits = 0
+        self.light_return = 0.0
+        self.router_return = 0.0
 
     def set_signal(self, intersection, state):
         switching_axis = state != self.signal[intersection] and CLOSED not in (self.signal[intersection], state)
@@ -71,9 +71,22 @@ class Simulation:
         count = [sum(self.agents_per_cell[cell] for cell in arm) for arm in self.city.arms[intersection]]
         return count[NORTH] + count[SOUTH], count[EAST] + count[WEST]
 
+    def longest_waits(self):
+        longest = [0] * self.city.n_intersections
+        for agent in self.agents.values():
+            intersection = self.city.arm_head.get(agent.cell)
+            if intersection is not None:
+                longest[intersection] = max(longest[intersection], agent.stuck_ticks)
+        return longest
+
+    def decision_cost(self, intersection, longest_wait, fairness_weight):
+        cost = self.waiting_since_decision[intersection] / self.decision_period + fairness_weight * longest_wait
+        self.light_return -= cost
+        return cost
+
     def is_done(self):
         everything_arrived = self.next_arrival >= len(self.arrivals) and not self.agents
-        return everything_arrived or self.time >= MAX_TICKS
+        return everything_arrived or self.time >= self.city.scenario.max_ticks
 
     def tick(self, router):
         self.spawn_due_agents()
@@ -88,15 +101,14 @@ class Simulation:
         self.all_red_ticks = [max(0, ticks - 1) for ticks in self.all_red_ticks]
 
     def _choose_moves(self, router):
-        directions = {}
-        for agent in self.agents.values():
+        agents = list(self.agents.values())
+        for agent in agents:
             agent.previous_cell = agent.cell
-            directions[agent] = router.choose_move(agent)
-        return directions
+        return dict(zip(agents, router.choose_moves(agents)))
 
     def spawn_due_agents(self):
         while self.next_arrival < len(self.arrivals) and self.arrivals[self.next_arrival].tick <= self.time:
-            if len(self.agents) >= MAX_AGENTS_ON_MAP:
+            if len(self.agents) >= self.city.scenario.max_agents_on_map:
                 break
             arrival = self.arrivals[self.next_arrival]
             agent = Agent(self.next_agent_id, arrival.destination, arrival.cell, self.time)
@@ -110,15 +122,15 @@ class Simulation:
         for agent, direction in directions.items():
             target = self.city.neighbor[agent.cell][direction]
             intersection = self.city.intersection_index.get(target)
-            if target == self.city.hole_cell:
+            if target in self.city.hole_cells:
                 hit_hole.append(agent)
-            elif intersection is not None and self._is_red(intersection, direction):
+            elif intersection is not None and self.is_red(intersection, direction):
                 self.waiting_since_decision[intersection] += 1
             else:
                 moves[agent] = target
         return moves, hit_hole
 
-    def _is_red(self, intersection, direction):
+    def is_red(self, intersection, direction):
         axis_with_green = EAST_WEST if direction % 2 == 1 else NORTH_SOUTH
         return self.all_red_ticks[intersection] > 0 or self.signal[intersection] != axis_with_green
 
@@ -137,9 +149,11 @@ class Simulation:
         self.hole_hits += len(hit_hole_agents)
         for agent in directions:
             agent.wait_ticks += agent not in moves
+            agent.stuck_ticks = 0 if agent in moves else agent.stuck_ticks + 1
             closer_by = (self.city.distance_to_door(agent.previous_cell, agent.destination)
                          - self.city.distance_to_door(agent.cell, agent.destination))
             reward = STEP_REWARD + DISTANCE_REWARD * closer_by - (HOLE_PENALTY if agent in hit_hole_agents else 0)
+            self.router_return += reward
             router.learn(agent, reward, agent in arrived_agents)
 
     def _remove(self, agent):

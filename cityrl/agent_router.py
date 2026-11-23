@@ -1,20 +1,24 @@
 import numpy as np
 
-from .city import CITY, DESTINATION_HOUSES, GRID_SIZE
+from .city import CITY
 
 
 class AgentRouter:
 
     def __init__(self, learning_rate, discount, seed=0):
         self.learning_rate, self.discount = learning_rate, discount
-        self.q_values = np.zeros((len(DESTINATION_HOUSES), GRID_SIZE * GRID_SIZE, 4))
+        self.q_values = np.zeros((CITY.n_destinations, CITY.grid_size ** 2, 4))
         self.rng = np.random.default_rng(seed)
         self.epsilon = 0.0
         self.learning = False
+        self.exploring = False
+
+    def choose_moves(self, agents):
+        return [self.choose_move(agent) for agent in agents]
 
     def choose_move(self, agent):
         valid_moves = CITY.valid_moves[agent.cell]
-        if self.learning and self.rng.random() < self.epsilon:
+        if self.exploring and self.rng.random() < self.epsilon:
             direction = int(self.rng.choice(np.flatnonzero(valid_moves)))
         else:
             direction = self._best_move(self.q_values[agent.destination, agent.cell], valid_moves)

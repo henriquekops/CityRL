@@ -5,11 +5,11 @@ from tkinter import messagebox, ttk
 from dataclasses import fields
 from typing import NamedTuple
 
-from .city import CITY, DESTINATION_HOUSES, DESTINATION_NAMES, GRID_SIZE, cell_of, is_street, position_of
+from .city import CITY, SCENARIOS, cell_of, is_street, position_of
 from .simulator import CLOSED, EAST_WEST, NORTH_SOUTH
 from .trainer import Hyperparameters, Trainer
 
-CELL_PIXELS = 60
+MAX_CELL_PIXELS, MIN_CELL_PIXELS, MAP_PIXELS = 60, 24, 720
 DEFAULT_EPOCHS = 100
 DEFAULT_AGENTS_PER_EPOCH = 300
 MAX_VISUALIZED_AGENTS = 10
@@ -17,19 +17,25 @@ VISUALIZATION_TICK_MS = 300
 WATCH_EVERY_N_EPOCHS = 10
 WATCH_TICK_DELAY_S = 0.015
 
-DESTINATION_COLORS = ["#e6194b", "#3cb44b", "#4363d8", "#f58231"]
+DESTINATION_COLORS = ["#e6194b", "#3cb44b", "#4363d8", "#f58231", "#911eb4", "#008080", "#9a6324", "#808000",
+                      "#000075", "#f032e6"]
 STREET_COLOR, BLOCK_COLOR, HOLE_COLOR = "#d9d9d9", "#f3e9d2", "black"
 GREEN, RED = "#2ca02c", "#d62728"
 
 
+def cell_pixels():
+    return max(MIN_CELL_PIXELS, min(MAX_CELL_PIXELS, MAP_PIXELS // CITY.grid_size))
+
+
 def cell_center_pixels(cell):
     row, col = position_of(cell)
-    return (col + 0.5) * CELL_PIXELS, (row + 0.5) * CELL_PIXELS
+    return (col + 0.5) * cell_pixels(), (row + 0.5) * cell_pixels()
 
 
 def snapshot(simulation):
     cars = [(*cell_center_pixels(agent.cell), agent.destination, agent.id) for agent in simulation.agents.values()]
-    return dict(signal=list(simulation.signal), all_red=list(simulation.all_red_ticks), cars=cars)
+    return dict(signal=list(simulation.signal), all_red=list(simulation.all_red_ticks), cars=cars,
+                holes=list(CITY.holes))
 
 
 class SelectedAgent(NamedTuple):
@@ -49,28 +55,39 @@ class TrainingProgress:
 class MapView(tk.Canvas):
 
     def __init__(self, parent, on_click):
-        size = GRID_SIZE * CELL_PIXELS
-        super().__init__(parent, width=size, height=size, bg="white", highlightthickness=0)
-        self.bind("<Button-1>", lambda event: on_click(event.y // CELL_PIXELS, event.x // CELL_PIXELS))
+        super().__init__(parent, bg="white", highlightthickness=0)
+        self.bind("<Button-1>", lambda event: on_click(event.y // cell_pixels(), event.x // cell_pixels()))
+        self.redraw()
+
+    def redraw(self):
+        self.delete("all")
+        size = CITY.grid_size * cell_pixels()
+        self.config(width=size, height=size)
         self._draw_static_map()
 
     def _square(self, row, col, margin=0, **options):
-        return self.create_rectangle(col * CELL_PIXELS + margin, row * CELL_PIXELS + margin,
-                                     (col + 1) * CELL_PIXELS - margin, (row + 1) * CELL_PIXELS - margin, **options)
+        pixels = cell_pixels()
+        return self.create_rectangle(col * pixels + margin, row * pixels + margin,
+                                     (col + 1) * pixels - margin, (row + 1) * pixels - margin, **options)
 
     def _draw_static_map(self):
-        for row in range(GRID_SIZE):
-            for col in range(GRID_SIZE):
+        for row in range(CITY.grid_size):
+            for col in range(CITY.grid_size):
                 self._square(row, col, fill=STREET_COLOR if is_street(row, col) else BLOCK_COLOR, outline="white")
-        self._square(*CITY.hole, fill=HOLE_COLOR, outline=HOLE_COLOR)
-        for index, (row, col) in enumerate(DESTINATION_HOUSES):
+        self._draw_holes(CITY.holes, tag="holes")
+        for index, (row, col) in enumerate(CITY.destination_houses):
             self._square(row, col, margin=2, fill=DESTINATION_COLORS[index], outline="black")
-            self.create_text((col + 0.5) * CELL_PIXELS, (row + 0.5) * CELL_PIXELS, text=DESTINATION_NAMES[index],
-                             fill="white", font=("Helvetica", 14, "bold"))
+            self.create_text(*cell_center_pixels(cell_of(row, col)), text=CITY.destination_names[index],
+                             fill="white", font=("Helvetica", max(8, cell_pixels() // 4), "bold"))
         self._draw_signals([CLOSED] * CITY.n_intersections, [0] * CITY.n_intersections, tag="signals")
 
+    def _draw_holes(self, holes, tag):
+        self.delete(tag)
+        for row, col in holes:
+            self._square(row, col, fill=HOLE_COLOR, outline=HOLE_COLOR, tags=tag)
+
     def _draw_signals(self, signal, all_red, tag):
-        half = CELL_PIXELS / 2
+        half = cell_pixels() / 2
         for intersection, cell in enumerate(CITY.intersections):
             x, y = cell_center_pixels(cell)
             traffic_flows = all_red[intersection] == 0
@@ -85,11 +102,15 @@ class MapView(tk.Canvas):
 
     def show_frame(self, frame):
         self.clear_frame()
+        self._draw_holes(frame["holes"], tag="holes")
         self._draw_signals(frame["signal"], frame["all_red"], tag="frame")
+        radius = cell_pixels() / 5
         for x, y, destination, agent_id in frame["cars"]:
-            self.create_oval(x - 12, y - 12, x + 12, y + 12, fill=DESTINATION_COLORS[destination], outline="black",
+            self.create_oval(x - radius, y - radius, x + radius, y + radius, fill=DESTINATION_COLORS[destination], outline="black",
                              width=2, tags="frame")
-            self.create_text(x, y, text=str(agent_id + 1), fill="white", font=("Helvetica", 10, "bold"), tags="frame")
+            if cell_pixels() >= 40:
+                self.create_text(x, y, text=str(agent_id + 1), fill="white", font=("Helvetica", 10, "bold"),
+                                 tags="frame")
 
     def show_selection(self, agents):
         self.delete("selection")
@@ -124,6 +145,7 @@ class App:
         self._build_training_controls(side)
         self._build_visualization_controls(side)
         self.status_label.config(text="Train before visualizing.")
+        self.hyperparameter_vars["scenario"].trace_add("write", lambda *_: self._on_scenario_changed())
         self._toggle_agent(0, 7)
 
     def _build_run_settings(self, parent):
@@ -132,7 +154,7 @@ class App:
         self.agents_var, self.epochs_var = tk.IntVar(value=DEFAULT_AGENTS_PER_EPOCH), tk.IntVar(value=DEFAULT_EPOCHS)
         ttk.Label(row, text="Agents per epoch").grid(row=0, column=0, sticky="w")
         ttk.Label(row, text="Epochs").grid(row=0, column=1, sticky="w", padx=(12, 0))
-        ttk.Spinbox(row, from_=1, to=500, increment=5, textvariable=self.agents_var, width=8).grid(row=1, column=0)
+        ttk.Spinbox(row, from_=1, to=5000, increment=50, textvariable=self.agents_var, width=8).grid(row=1, column=0)
         ttk.Spinbox(row, from_=1, to=10000, increment=50, textvariable=self.epochs_var, width=8).grid(
             row=1, column=1, padx=(12, 0))
 
@@ -145,7 +167,7 @@ class App:
         box.pack(fill="x", pady=(8, 0))
         for column, (group, settings) in enumerate(groups.items()):
             frame = ttk.Frame(box)
-            frame.grid(row=0, column=column, sticky="n", padx=6, pady=4)
+            frame.grid(row=column // 2, column=column % 2, sticky="nw", padx=6, pady=4)
             ttk.Label(frame, text=group, font=("Helvetica", 11, "bold")).grid(row=0, column=0, columnspan=2, sticky="w")
             for row, setting in enumerate(settings, start=1):
                 widget, variable = self._hyperparameter_widget(frame, row, setting)
@@ -155,6 +177,13 @@ class App:
     @staticmethod
     def _hyperparameter_widget(frame, row, setting):
         label = setting.metadata["label"]
+        if "choices" in setting.metadata:
+            variable = tk.StringVar(value=setting.default)
+            ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w")
+            widget = ttk.Combobox(frame, textvariable=variable, values=list(setting.metadata["choices"]),
+                                  state="readonly", width=10)
+            widget.grid(row=row, column=1, padx=(6, 0))
+            return widget, variable
         if setting.type is bool:
             variable = tk.BooleanVar(value=setting.default)
             widget = ttk.Checkbutton(frame, text=label, variable=variable)
@@ -192,9 +221,10 @@ class App:
         row = ttk.Frame(parent)
         row.pack(anchor="w")
         ttk.Label(row, text="Destination").pack(side="left")
-        self.destination_var = tk.StringVar(value=DESTINATION_NAMES[0])
-        ttk.Combobox(row, textvariable=self.destination_var, values=list(DESTINATION_NAMES), state="readonly",
-                     width=3).pack(side="left", padx=4)
+        self.destination_var = tk.StringVar(value=CITY.destination_names[0])
+        self.destination_box = ttk.Combobox(row, textvariable=self.destination_var, values=CITY.destination_names,
+                                            state="readonly", width=3)
+        self.destination_box.pack(side="left", padx=4)
         self.visualize_button = ttk.Button(parent, text="Visualize", command=self._start_visualization, state="disabled")
         self.visualize_button.pack(fill="x", pady=(8, 2))
         ttk.Button(parent, text="Clear agents", command=self._clear_agents).pack(fill="x")
@@ -218,7 +248,8 @@ class App:
 
     def _set_hyperparameters_enabled(self, enabled):
         for widget in self.hyperparameter_widgets:
-            widget.config(state="normal" if enabled else "disabled")
+            enabled_state = "readonly" if isinstance(widget, ttk.Combobox) else "normal"
+            widget.config(state=enabled_state if enabled else "disabled")
 
     def _reset_visualization(self):
         self.map.clear_frame()
@@ -232,6 +263,7 @@ class App:
             if hyperparameters is None:
                 return
             self.trainer = Trainer(hyperparameters)
+            self._on_city_changed()
             self._set_hyperparameters_enabled(False)
         self.is_training, self.stop_requested = True, False
         self.total_epochs = max(1, int(self.epochs_var.get()))
@@ -286,6 +318,8 @@ class App:
                                            f"mean trip: {record['mean_trip_ticks']} ticks\n"
                                            f"mean wait: {record['mean_wait_ticks']} ticks\n"
                                            f"hole hits: {record['hole_hits']}\n"
+                                           f"light return: {record['light_return']}\n"
+                                           f"agents return: {record['router_return']}\n"
                                            f"epoch length: {record['makespan_ticks']} ticks\n"
                                            f"epoch time: {record['seconds']} s")
         if still_training:
@@ -299,6 +333,23 @@ class App:
             else:
                 message = f"Stopped after {progress.epochs_done} epochs. Run saved to results/training.json"
             self.status_label.config(text=message)
+
+    def _on_scenario_changed(self):
+        if self.trainer is not None:
+            return
+        scenario = self.hyperparameter_vars["scenario"].get()
+        CITY.configure(scenario)
+        self.agents_var.set(SCENARIOS[scenario].default_agents)
+        self._on_city_changed()
+
+    def _on_city_changed(self):
+        self.map.redraw()
+        self.destination_box.config(values=CITY.destination_names)
+        if self.destination_var.get() not in CITY.destination_names:
+            self.destination_var.set(CITY.destination_names[0])
+        self.selection = [agent for agent in self.selection if CITY.can_place_agent(agent.cell)
+                          and agent.destination < CITY.n_destinations and CITY.door_cell[agent.destination] != agent.cell]
+        self.map.show_selection(self.selection)
 
     def _new_run(self):
         if self.is_training or self.is_animating:
@@ -332,7 +383,7 @@ class App:
         cell = cell_of(row, col)
         if not CITY.can_place_agent(cell):
             return
-        destination = DESTINATION_NAMES.index(self.destination_var.get())
+        destination = CITY.destination_names.index(self.destination_var.get())
         already_there = [agent for agent in self.selection if agent.cell == cell]
         if already_there:
             self.selection.remove(already_there[0])
