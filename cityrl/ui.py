@@ -1,19 +1,21 @@
 import threading
+from pathlib import Path
 import time
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 from dataclasses import fields
-from typing import NamedTuple
 
 from .city import CITY, SCENARIOS, cell_of, is_street, position_of
-from .simulator import CLOSED, EAST_WEST, NORTH_SOUTH
-from .trainer import Hyperparameters, Trainer
+from .models import MODELS_DIR, describe, load_model, save_model
+from .simulator import CLOSED, EAST_WEST, NORTH_SOUTH, scattered_agents
+from .trainer import RESULTS_FILE, Hyperparameters, Trainer
 
-MAX_CELL_PIXELS, MIN_CELL_PIXELS, MAP_PIXELS = 60, 24, 720
+MAX_CELL_PIXELS, MIN_CELL_PIXELS, MAP_PIXELS = 60, 6, 720
+WINDOW_MARGIN_PIXELS = 100
 DEFAULT_EPOCHS = 100
 DEFAULT_AGENTS_PER_EPOCH = 300
-MAX_VISUALIZED_AGENTS = 10
 VISUALIZATION_TICK_MS = 300
+DEFAULT_VISUALIZED_AGENTS = 10
 WATCH_EVERY_N_EPOCHS = 10
 WATCH_TICK_DELAY_S = 0.015
 
@@ -23,8 +25,11 @@ STREET_COLOR, BLOCK_COLOR, HOLE_COLOR = "#d9d9d9", "#f3e9d2", "black"
 GREEN, RED = "#2ca02c", "#d62728"
 
 
+map_pixels = MAP_PIXELS
+
+
 def cell_pixels():
-    return max(MIN_CELL_PIXELS, min(MAX_CELL_PIXELS, MAP_PIXELS // CITY.grid_size))
+    return max(MIN_CELL_PIXELS, min(MAX_CELL_PIXELS, map_pixels // CITY.grid_size))
 
 
 def cell_center_pixels(cell):
@@ -38,11 +43,6 @@ def snapshot(simulation):
                 holes=list(CITY.holes))
 
 
-class SelectedAgent(NamedTuple):
-    cell: int
-    destination: int
-
-
 class TrainingProgress:
 
     def __init__(self, first_epoch):
@@ -50,13 +50,14 @@ class TrainingProgress:
         self.epochs_done = 0
         self.last_record = None
         self.snapshot = None
+        self.model_path = None
+        self.model_error = None
 
 
 class MapView(tk.Canvas):
 
-    def __init__(self, parent, on_click):
+    def __init__(self, parent):
         super().__init__(parent, bg="white", highlightthickness=0)
-        self.bind("<Button-1>", lambda event: on_click(event.y // cell_pixels(), event.x // cell_pixels()))
         self.redraw()
 
     def redraw(self):
@@ -87,15 +88,15 @@ class MapView(tk.Canvas):
             self._square(row, col, fill=HOLE_COLOR, outline=HOLE_COLOR, tags=tag)
 
     def _draw_signals(self, signal, all_red, tag):
-        half = cell_pixels() / 2
+        half, bar = cell_pixels() / 2, max(2, cell_pixels() / 12)
         for intersection, cell in enumerate(CITY.intersections):
             x, y = cell_center_pixels(cell)
             traffic_flows = all_red[intersection] == 0
             east_west = GREEN if traffic_flows and signal[intersection] == EAST_WEST else RED
             north_south = GREEN if traffic_flows and signal[intersection] == NORTH_SOUTH else RED
-            self.create_rectangle(x - half, y - 5, x + half, y + 5, fill=east_west, outline="", tags=tag)
-            self.create_rectangle(x - 5, y - half, x + 5, y + half, fill=north_south, outline="", tags=tag)
-            self.create_rectangle(x - 5, y - 5, x + 5, y + 5, fill="#333", outline="", tags=tag)
+            self.create_rectangle(x - half, y - bar, x + half, y + bar, fill=east_west, outline="", tags=tag)
+            self.create_rectangle(x - bar, y - half, x + bar, y + half, fill=north_south, outline="", tags=tag)
+            self.create_rectangle(x - bar, y - bar, x + bar, y + bar, fill="#333", outline="", tags=tag)
 
     def clear_frame(self):
         self.delete("frame")
@@ -112,15 +113,6 @@ class MapView(tk.Canvas):
                 self.create_text(x, y, text=str(agent_id + 1), fill="white", font=("Helvetica", 10, "bold"),
                                  tags="frame")
 
-    def show_selection(self, agents):
-        self.delete("selection")
-        for number, agent in enumerate(agents, start=1):
-            row, col = position_of(agent.cell)
-            color = DESTINATION_COLORS[agent.destination]
-            self._square(row, col, margin=2, outline=color, width=3, tags="selection")
-            self.create_text(*cell_center_pixels(agent.cell), text=str(number), fill=color, tags="selection",
-                             font=("Helvetica", 11, "bold"))
-
 
 class App:
     def __init__(self, root):
@@ -133,20 +125,90 @@ class App:
         self.stop_requested = False
         self.watching_training = False
         self.animation_job = None
-        self.selection = []
         self.simulation = None
+        self.model_loaded = False
 
-        self.map = MapView(root, on_click=self._on_map_click)
-        self.map.grid(row=0, column=0, padx=8, pady=8)
-        side = ttk.Frame(root)
-        side.grid(row=0, column=1, sticky="n", padx=(0, 8), pady=8)
+        self.map = MapView(root)
+        self.map.grid(row=0, column=0, padx=8, pady=8, sticky="n")
+        self.resize_job = None
+        side = self._scrollable_panel(root)
         self._build_run_settings(side)
         self._build_hyperparameter_panel(side)
         self._build_training_controls(side)
         self._build_visualization_controls(side)
         self.status_label.config(text="Train before visualizing.")
         self.hyperparameter_vars["scenario"].trace_add("write", lambda *_: self._on_scenario_changed())
-        self._toggle_agent(0, 7)
+        self._fit_window()
+
+    def _scrollable_panel(self, root):
+        root.rowconfigure(0, weight=1)
+        root.columnconfigure(1, weight=1)
+        outer = ttk.Frame(root)
+        outer.grid(row=0, column=1, sticky="nsew", padx=(0, 8), pady=8)
+        canvas = tk.Canvas(outer, highlightthickness=0, borderwidth=0)
+        self.panel_outer = outer
+        scrollbar = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        panel = ttk.Frame(canvas)
+        canvas.create_window((0, 0), window=panel, anchor="nw")
+
+        def fit(_event):
+            canvas.configure(scrollregion=canvas.bbox("all"), width=panel.winfo_reqwidth(),
+                             height=min(panel.winfo_reqheight(), root.winfo_screenheight() - 140))
+
+        def wheel(event):
+            if event.num == 4 or event.delta > 0:
+                canvas.yview_scroll(-1, "units")
+            elif event.num == 5 or event.delta < 0:
+                canvas.yview_scroll(1, "units")
+
+        panel.bind("<Configure>", fit)
+        for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            outer.bind_all(sequence, lambda event: wheel(event) if self._is_inside(event, outer) else None)
+        return panel
+
+    def _fit_window(self):
+        """Opens the window as large as the screen allows, shrinking the map when everything does not fit."""
+        root = self.root
+        root.update_idletasks()
+        width, height = root.winfo_screenwidth() - 40, root.winfo_screenheight() - WINDOW_MARGIN_PIXELS
+        self._resize_map(self._map_space(width, height))
+        root.update_idletasks()
+        root.geometry(f"{min(width, root.winfo_reqwidth())}x{min(height, root.winfo_reqheight())}")
+        root.bind("<Configure>", self._on_window_resized)
+
+    def _panel_width(self):
+        return self.panel_outer.winfo_reqwidth() + 8
+
+    def _map_space(self, width, height):
+        width = min(width, self.root.winfo_screenwidth() - 40)
+        height = min(height, self.root.winfo_screenheight() - WINDOW_MARGIN_PIXELS)
+        return max(MIN_CELL_PIXELS * CITY.grid_size, min(height - 16, width - self._panel_width() - 16))
+
+    def _on_window_resized(self, event):
+        if event.widget is not self.root:
+            return
+        if self.resize_job:
+            self.root.after_cancel(self.resize_job)
+        self.resize_job = self.root.after(150, lambda: self._resize_map(
+            self._map_space(self.root.winfo_width(), self.root.winfo_height())))
+
+    def _resize_map(self, pixels):
+        global map_pixels
+        self.resize_job = None
+        before = cell_pixels()
+        map_pixels = pixels
+        if cell_pixels() != before or not self.map.find_all():
+            self.map.redraw()
+            if self.simulation is not None:
+                self.map.show_frame(snapshot(self.simulation))
+
+    @staticmethod
+    def _is_inside(event, widget):
+        x, y = widget.winfo_rootx(), widget.winfo_rooty()
+        return x <= event.x_root < x + widget.winfo_width() and y <= event.y_root < y + widget.winfo_height()
 
     def _build_run_settings(self, parent):
         row = ttk.Frame(parent)
@@ -205,6 +267,10 @@ class App:
         self.new_run_button.pack(side="left", expand=True, fill="x")
         self.stop_button = ttk.Button(buttons, text="Stop", command=self._stop, state="disabled")
         self.stop_button.pack(side="left", expand=True, fill="x")
+        self.load_button = ttk.Button(parent, text="Load model...", command=self._load_model)
+        self.load_button.pack(fill="x")
+        self.model_label = ttk.Label(parent, text="", foreground="#555", wraplength=260)
+        self.model_label.pack(anchor="w")
         self.epoch_label = ttk.Label(parent, text=f"Epoch 0 / {self.total_epochs}", font=("Helvetica", 14, "bold"))
         self.epoch_label.pack(anchor="w")
         self.progress_bar = ttk.Progressbar(parent, maximum=self.total_epochs)
@@ -217,27 +283,30 @@ class App:
 
     def _build_visualization_controls(self, parent):
         ttk.Separator(parent).pack(fill="x", pady=10)
-        ttk.Label(parent, text=f"Visualize agents (up to {MAX_VISUALIZED_AGENTS})").pack(anchor="w")
+        ttk.Label(parent, text="Visualize agents (no learning)").pack(anchor="w")
         row = ttk.Frame(parent)
-        row.pack(anchor="w")
-        ttk.Label(row, text="Destination").pack(side="left")
-        self.destination_var = tk.StringVar(value=CITY.destination_names[0])
-        self.destination_box = ttk.Combobox(row, textvariable=self.destination_var, values=CITY.destination_names,
-                                            state="readonly", width=3)
-        self.destination_box.pack(side="left", padx=4)
+        row.pack(anchor="w", pady=(4, 0))
+        ttk.Label(row, text="Agents").pack(side="left")
+        self.spawn_var = tk.IntVar(value=DEFAULT_VISUALIZED_AGENTS)
+        self.spawn_box = ttk.Spinbox(row, from_=0, to=CITY.max_spawned_agents, increment=10,
+                                     textvariable=self.spawn_var, width=6)
+        self.spawn_box.pack(side="left", padx=4)
+        self.spawn_limit_label = ttk.Label(parent, text="", foreground="#555", wraplength=400)
+        self.spawn_limit_label.pack(anchor="w")
+        self._update_spawn_limit()
         self.visualize_button = ttk.Button(parent, text="Visualize", command=self._start_visualization, state="disabled")
         self.visualize_button.pack(fill="x", pady=(8, 2))
-        ttk.Button(parent, text="Clear agents", command=self._clear_agents).pack(fill="x")
-        self.status_label = ttk.Label(parent, text="", foreground="#555", wraplength=200)
+        self.status_label = ttk.Label(parent, text="", foreground="#555", wraplength=400)
         self.status_label.pack(anchor="w")
 
     def _set_buttons(self, train, new_run, visualize, stop=False):
         for button, enabled in ((self.train_button, train), (self.new_run_button, new_run),
-                                (self.visualize_button, visualize), (self.stop_button, stop)):
+                                (self.visualize_button, visualize), (self.stop_button, stop),
+                                (self.load_button, train)):
             button.config(state="normal" if enabled else "disabled")
 
     def _is_trained(self):
-        return self.trainer is not None and self.trainer.epochs_done > 0
+        return self.trainer is not None and (self.trainer.epochs_done > 0 or self.model_loaded)
 
     def _read_hyperparameters(self):
         try:
@@ -287,6 +356,11 @@ class App:
         try:
             self.trainer.train(epochs, n_agents, on_epoch, should_stop=lambda: self.stop_requested,
                                on_tick=self._on_training_tick)
+            if progress.epochs_done > 0:
+                try:
+                    progress.model_path = save_model(self.trainer)
+                except Exception as error:
+                    progress.model_error = str(error)
         finally:
             self.is_training = False
 
@@ -327,11 +401,16 @@ class App:
         else:
             self._set_buttons(train=True, new_run=True, visualize=self._is_trained())
             if not self.stop_requested:
-                message = "Run saved to results/training.json"
+                message = f"Run saved to {RESULTS_FILE}"
             elif progress.epochs_done == 0:
                 message = "Stopped before the first epoch finished: nothing saved."
             else:
-                message = f"Stopped after {progress.epochs_done} epochs. Run saved to results/training.json"
+                message = f"Stopped after {progress.epochs_done} epochs. Run saved to {RESULTS_FILE}"
+            if progress.model_path:
+                message += f"\nModel saved to {progress.model_path}"
+                self.model_label.config(text=f"Model: {describe(self.trainer)}")
+            elif progress.model_error:
+                message += f"\nModel NOT saved: {progress.model_error}"
             self.status_label.config(text=message)
 
     def _on_scenario_changed(self):
@@ -342,19 +421,34 @@ class App:
         self.agents_var.set(SCENARIOS[scenario].default_agents)
         self._on_city_changed()
 
+    def _update_spawn_limit(self):
+        limit = CITY.max_spawned_agents
+        self.spawn_box.config(to=limit)
+        if self._spawn_count() > limit:
+            self.spawn_var.set(limit)
+        self.spawn_limit_label.config(text=f"max {limit}: street cells that are not a crossing, hole or "
+                                           f"destination door (one agent per cell, random destinations)")
+
+    def _spawn_count(self):
+        try:
+            return max(0, int(self.spawn_var.get()))
+        except (tk.TclError, ValueError):
+            return 0
+
     def _on_city_changed(self):
-        self.map.redraw()
-        self.destination_box.config(values=CITY.destination_names)
-        if self.destination_var.get() not in CITY.destination_names:
-            self.destination_var.set(CITY.destination_names[0])
-        self.selection = [agent for agent in self.selection if CITY.can_place_agent(agent.cell)
-                          and agent.destination < CITY.n_destinations and CITY.door_cell[agent.destination] != agent.cell]
-        self.map.show_selection(self.selection)
+        if self.root.winfo_ismapped():
+            self.map.delete("all")
+            self._resize_map(self._map_space(self.root.winfo_width(), self.root.winfo_height()))
+        else:
+            self.map.redraw()
+        self._update_spawn_limit()
 
     def _new_run(self):
         if self.is_training or self.is_animating:
             return
         self.trainer = None
+        self.model_loaded = False
+        self.model_label.config(text="")
         self.progress = TrainingProgress(first_epoch=0)
         self._reset_visualization()
         self.epoch_label.config(text=f"Epoch 0 / {self.total_epochs}")
@@ -375,36 +469,15 @@ class App:
             self.status_label.config(text=f"Stopped at tick {self.simulation.time}.")
             self._set_buttons(train=True, new_run=True, visualize=True)
 
-    def _on_map_click(self, row, col):
-        if not self.is_animating:
-            self._toggle_agent(row, col)
-
-    def _toggle_agent(self, row, col):
-        cell = cell_of(row, col)
-        if not CITY.can_place_agent(cell):
-            return
-        destination = CITY.destination_names.index(self.destination_var.get())
-        already_there = [agent for agent in self.selection if agent.cell == cell]
-        if already_there:
-            self.selection.remove(already_there[0])
-        elif len(self.selection) < MAX_VISUALIZED_AGENTS and CITY.door_cell[destination] != cell:
-            self.selection.append(SelectedAgent(cell, destination))
-        else:
-            return
-        self._reset_visualization()
-        self.map.show_selection(self.selection)
-
-    def _clear_agents(self):
-        if not self.is_animating:
-            self.selection = []
-            self._reset_visualization()
-            self.map.show_selection(self.selection)
-
     def _start_visualization(self):
-        if not self.selection or not self._is_trained():
+        if not self._is_trained():
             return
-        agents = [(agent.cell, agent.destination) for agent in self.selection]
-        self.simulation = self.trainer.simulation_for_agents(agents)
+        agents = scattered_agents(min(self._spawn_count(), CITY.max_spawned_agents))
+        if not agents:
+            self.status_label.config(text="Choose how many agents to spawn.")
+            return
+        self.visualized_agents = len(agents)
+        self.simulation = self.trainer.simulation_for_agents(agents, max_agents_on_map=len(agents))
         self.simulation.spawn_due_agents()
         self.is_animating = True
         self._set_buttons(train=False, new_run=False, visualize=False, stop=True)
@@ -417,11 +490,40 @@ class App:
         self.status_label.config(text=f"tick {simulation.time}  |  on the map: {len(simulation.agents)}")
         if simulation.is_done():
             self.status_label.config(
-                text=f"{len(simulation.trips)}/{len(self.selection)} agents arrived in {simulation.time} ticks.")
+                text=f"{len(simulation.trips)}/{self.visualized_agents} agents arrived in {simulation.time} ticks.")
             self.is_animating = False
             self._set_buttons(train=True, new_run=True, visualize=True)
         else:
             self.animation_job = self.root.after(VISUALIZATION_TICK_MS, self._animate)
+
+    def _load_model(self):
+        if self.is_training or self.is_animating:
+            return
+        folder = MODELS_DIR if MODELS_DIR.exists() else Path(".")
+        path = filedialog.askopenfilename(title="Load model", initialdir=folder.resolve(),
+                                          filetypes=[("CityRL model", "*.pt"), ("All files", "*")])
+        if not path:
+            return
+        try:
+            trainer = load_model(path)
+        except Exception as error:
+            messagebox.showerror("Load model", f"Could not load {path}:\n{error}")
+            return
+        self.trainer, self.model_loaded = trainer, True
+        for name, variable in self.hyperparameter_vars.items():
+            variable.set(getattr(trainer.hyperparameters, name))
+        self._set_hyperparameters_enabled(False)
+        self.agents_var.set(CITY.scenario.default_agents)
+        self.progress = TrainingProgress(first_epoch=trainer.epochs_done)
+        self.epoch_label.config(text=f"Epoch 0 / {self.total_epochs}")
+        self.progress_bar.config(value=0)
+        self.metrics_label.config(text="")
+        self._reset_visualization()
+        self._on_city_changed()
+        self._set_buttons(train=True, new_run=True, visualize=True)
+        self.model_label.config(text=f"Model: {describe(trainer)}")
+        self.status_label.config(text="Model loaded: choose how many agents and press Visualize (no learning, "
+                                      "greedy policy). Train continues training it.")
 
 
 def main():
