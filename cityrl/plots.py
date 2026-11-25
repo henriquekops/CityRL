@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from .experiments import EXPERIMENTS_DIR, slug
+from .logs import logger
 
 FIGURES_DIR = Path("results/figures")
 SMOOTHING = 10
@@ -127,7 +128,7 @@ def main():
     plot_scale(runs)
     table = evaluation_table(runs)
     (FIGURES_DIR / "evaluation.csv").write_text(table)
-    print(table)
+    logger("plots")(table)
 
 
 if __name__ == "__main__":

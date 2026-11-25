@@ -12,11 +12,12 @@ from .agent_router import AgentRouter
 
 MIN_EPSILON = 0.02
 EXPLORATION_DECAY_FRACTION = 0.7
-RESULTS_FILE = Path("results/training.json")
+RESULTS_FILE = Path("results/experiments/training.json")
 SEED_STRIDE = 100_000
 EVALUATION_SEED = 10_000_000
 EVALUATION_EPSILON = 0.05
 PRETRAIN_SEED = 20_000_000
+ROUTER_AVERAGE_FRACTION = 0.3
 Q_LEARNING, DQN_METHOD, LONGEST_QUEUE = "Q-learning", "DQN", "Longest queue"
 METHODS = (Q_LEARNING, DQN_METHOD, LONGEST_QUEUE)
 
@@ -81,15 +82,24 @@ class Trainer:
     def pretrain_router(self, n_agents):
         epochs = self.hyperparameters.router_pretrain_epochs
         lights, self.light_agent = self.light_agent, LongestQueueLights(self.hyperparameters.fairness_weight)
+        averaged, n_averaged = None, 0
         for epoch_index in range(epochs):
             self.router.epsilon = max(MIN_EPSILON, self.hyperparameters.router_epsilon
                                       * (1 - epoch_index / (EXPLORATION_DECAY_FRACTION * epochs)))
             simulation = self._new_simulation(n_agents, seed=PRETRAIN_SEED + self.seed * SEED_STRIDE + epoch_index)
             self._run_epoch(simulation, learning=True)
+            if epoch_index >= epochs * (1 - ROUTER_AVERAGE_FRACTION):
+                n_averaged += 1
+                averaged = (self.router.q_values.copy() if averaged is None
+                            else averaged + (self.router.q_values - averaged) / n_averaged)
+        if averaged is not None:
+            # The frozen table is the mean of the last epochs' tables: with a constant learning rate, the noise of the
+            # waits at red lights made neighbouring cells point at each other (agents going back and forth forever).
+            self.router.q_values = averaged
         self.light_agent = lights
         self.router_frozen = True
 
-    def train(self, epochs, n_agents, on_epoch=None, should_stop=lambda: False, on_tick=None):
+    def train(self, epochs, n_agents, on_epoch=None, should_stop=lambda: False, on_tick=None, save=True):
         if self.hyperparameters.router_pretrain_epochs and not self.router_frozen:
             self.pretrain_router(n_agents)
         for epoch_index in range(epochs):
@@ -101,7 +111,7 @@ class Trainer:
             self.history.append(self._epoch_record(simulation, n_agents, seconds))
             if on_epoch:
                 on_epoch(self.history[-1])
-        if self.history:
+        if self.history and save:
             self.save_results()
 
     def _set_exploration(self, epoch_index, epochs):
@@ -165,10 +175,10 @@ class Trainer:
         self.light_agent.epsilon, self.router.epsilon = saved
         return {key: round(sum(record[key] for record in records) / episodes, 3) for key in records[0]}
 
-    def simulation_for_agents(self, agents):
+    def simulation_for_agents(self, agents, max_agents_on_map=None):
         self.router.learning = self.router.exploring = False
         self.light_agent.start_episode()
-        return Simulation(chosen_arrivals(agents), self.hyperparameters.decision_period)
+        return Simulation(chosen_arrivals(agents), self.hyperparameters.decision_period, max_agents_on_map)
 
     def save_results(self, path=RESULTS_FILE):
         path = Path(path)

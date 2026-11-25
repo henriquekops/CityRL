@@ -8,6 +8,8 @@ from pathlib import Path
 import numpy as np
 
 from .city import SCENARIOS
+from .logs import logger
+from .models import model_path, router_path, save_model
 from .trainer import METHODS, Hyperparameters, Trainer
 
 EXPERIMENTS_DIR = Path("results/experiments")
@@ -23,7 +25,7 @@ def result_path(scenario, method, seed):
 
 
 def pretrained_router(trainer, scenario, seed, n_agents):
-    path = EXPERIMENTS_DIR / slug(scenario) / f"router_seed{seed}.npy"
+    path = router_path(scenario, seed)
     if path.exists():
         trainer.router.q_values = np.load(path)
         trainer.router_frozen = True
@@ -47,6 +49,7 @@ def run(scenario, method, seed, epochs, n_agents, evaluation_episodes, overrides
     path = result_path(scenario, method, seed)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(summary, indent=1, ensure_ascii=False))
+    save_model(trainer, model_path(scenario, method, seed))
     return summary
 
 
@@ -77,6 +80,7 @@ def main():
 
     args = parser.parse_args()
     overrides = parse_overrides(args.set)
+    log = logger("experiments")
 
     for scenario in args.scenarios:
         n_agents = args.agents_per_epoch or SCENARIOS[scenario].default_agents
@@ -86,16 +90,16 @@ def main():
             for method in args.methods:
 
                 if result_path(scenario, method, seed).exists() and not args.overwrite:
-                    print(f"{scenario} | {method} seed {seed}: already done, skipped", flush=True)
+                    log(f"{scenario} | {method} seed {seed}: already done, skipped")
                     continue
 
                 summary = run(scenario, method, seed, args.epochs, n_agents, args.evaluation_episodes, overrides,
                               args.hole_seed, args.pretrain_epochs)
                 evaluation = summary["evaluation"]
-                print(f"{scenario} | {method:13} seed {seed}: "
-                      f"arrived {evaluation['arrived']:.0f}/{evaluation['agents_created']:.0f}, "
-                      f"trip {evaluation['mean_trip_ticks']:.2f}, wait {evaluation['mean_wait_ticks']:.2f} ticks, "
-                      f"light return {evaluation['light_return']:.1f}, {summary['wall_seconds']} s", flush=True)
+                log(f"{scenario} | {method:13} seed {seed}: "
+                    f"arrived {evaluation['arrived']:.0f}/{evaluation['agents_created']:.0f}, "
+                    f"trip {evaluation['mean_trip_ticks']:.2f}, wait {evaluation['mean_wait_ticks']:.2f} ticks, "
+                    f"light return {evaluation['light_return']:.1f}, {summary['wall_seconds']} s")
 
 
 if __name__ == "__main__":
