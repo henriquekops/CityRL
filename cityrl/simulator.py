@@ -35,6 +35,12 @@ def chosen_arrivals(agents):
     return [Arrival(0, destination, cell) for cell, destination in agents]
 
 
+def scattered_agents(n_agents, seed=None):
+    rng = np.random.default_rng(seed)
+    cells = rng.permutation(CITY.agent_start_cells())[:n_agents]
+    return [(int(cell), int(rng.integers(CITY.n_destinations))) for cell in cells]
+
+
 class Agent:
     def __init__(self, agent_id, destination, cell, spawn_tick):
         self.id, self.destination, self.cell, self.spawn_tick = agent_id, destination, cell, spawn_tick
@@ -45,8 +51,9 @@ class Agent:
 
 
 class Simulation:
-    def __init__(self, arrivals, decision_period=DEFAULT_DECISION_PERIOD):
+    def __init__(self, arrivals, decision_period=DEFAULT_DECISION_PERIOD, max_agents_on_map=None):
         self.city = CITY
+        self.max_agents_on_map = max_agents_on_map or CITY.scenario.max_agents_on_map
         self.arrivals, self.next_arrival = arrivals, 0
         self.decision_period = decision_period
         self.time = 0
@@ -108,7 +115,7 @@ class Simulation:
 
     def spawn_due_agents(self):
         while self.next_arrival < len(self.arrivals) and self.arrivals[self.next_arrival].tick <= self.time:
-            if len(self.agents) >= self.city.scenario.max_agents_on_map:
+            if len(self.agents) >= self.max_agents_on_map:
                 break
             arrival = self.arrivals[self.next_arrival]
             agent = Agent(self.next_agent_id, arrival.destination, arrival.cell, self.time)

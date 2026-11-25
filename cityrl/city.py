@@ -85,10 +85,17 @@ class City:
             if len(holes) < self.scenario.n_holes and not ends & used_crossings:
                 holes.append(cell)
                 used_crossings |= ends
-        self.hole_cells = set(holes)
-        self.holes = [position_of(cell) for cell in holes]
-        self.spawn_cells = [cell for cell in self.street_cells if self._is_on_border(cell)
-                            and cell not in self.intersection_index and cell not in self.hole_cells]
+        self.set_holes([position_of(cell) for cell in holes])
+
+    def set_holes(self, positions):
+        self.holes = [tuple(position) for position in positions]
+        self.hole_cells = {cell_of(*position) for position in self.holes}
+        self.spawn_cells = self.agent_start_cells()
+
+    @property
+    def max_spawned_agents(self):
+        return len(self.agent_start_cells())
+
     def _segment_ends(self, cell):
         row, col = position_of(cell)
         if row % ROAD_SPACING == 0:
@@ -138,16 +145,16 @@ class City:
             raise ValueError(f"house {house} is not next to a street")
         return -1
 
-    def _is_on_border(self, cell):
-        row, col = position_of(cell)
-        return row in (0, self.grid_size - 1) or col in (0, self.grid_size - 1)
-
     def distance_to_door(self, cell, destination):
         (row, col), (door_row, door_col) = position_of(cell), position_of(self.door_cell[destination])
         return abs(row - door_row) + abs(col - door_col)
 
     def can_place_agent(self, cell):
         return cell in self.neighbor and cell not in self.intersection_index and cell not in self.hole_cells
+
+    def agent_start_cells(self):
+        doors = set(self.door_cell)
+        return [cell for cell in self.street_cells if self.can_place_agent(cell) and cell not in doors]
 
 
 CITY = City()
